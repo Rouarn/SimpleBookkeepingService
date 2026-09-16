@@ -58,6 +58,6 @@
     "oxlint-tsgolint": "^7.0.2001",
     "prettier": "^3.9.6",
     "source-map-support": "^0.5.21",
-    "typescript": "^7.0.2"
+    "typescript": "~6.0.2"
   }
 }

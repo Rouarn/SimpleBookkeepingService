@@ -37,7 +37,7 @@ export class RedisThrottlerStorage implements ThrottlerStorage {
       .zremrangebyscore(redisKey, 0, windowStart)
       .zadd(redisKey, now, `${now}:${randomUUID()}`)
       .zcard(redisKey)
-      .zrange(redisKey, 0, 0, 'WITHSCORES')
+      .zrange(redisKey, '0', '0', 'WITHSCORES')
       .pexpire(redisKey, ttl)
       .exec()) as Array<[Error | null, unknown]>;
 
