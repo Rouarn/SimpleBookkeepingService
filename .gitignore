@@ -3,6 +3,9 @@
 /node_modules
 /build
 
+# deployable package (produced by pnpm package:deploy, contains no source)
+/deploy
+
 # TypeScript build cache
 *.tsbuildinfo
 

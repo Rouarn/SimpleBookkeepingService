@@ -8,6 +8,7 @@
   "type": "module",
   "scripts": {
     "build": "nest build",
+    "package:deploy": "node scripts/package-deploy.mjs",
     "start": "nest start",
     "start:dev": "NODE_ENV=development nest start --watch",
     "start:debug": "nest start --debug --watch",
@@ -17,6 +18,7 @@
     "format": "prettier --write \"src/**/*.ts\"",
     "migration:build": "nest build",
     "migration:run": "nest build && typeorm migration:run -d dist/database/data-source.js",
+    "migration:run:prod": "typeorm migration:run -d dist/database/data-source.js",
     "migration:revert": "typeorm migration:revert -d dist/database/data-source.js",
     "migration:generate": "nest build && typeorm migration:generate -d dist/database/data-source.js"
   },

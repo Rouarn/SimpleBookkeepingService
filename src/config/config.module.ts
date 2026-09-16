@@ -17,9 +17,7 @@ import configuration from './configuration.js';
       envFilePath:
         process.env.NODE_ENV === 'production'
           ? ['.env.production', '.env']
-          : process.env.NODE_ENV === 'test'
-            ? ['.env.test', '.env.development', '.env']
-            : ['.env.development', '.env'],
+          : ['.env.development', '.env'],
       load: [configuration],
     }),
   ],
