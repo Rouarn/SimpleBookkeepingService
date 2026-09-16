@@ -44,6 +44,10 @@ export class FilesController {
     response.setHeader('Content-Type', 'image/jpeg');
     response.setHeader('Cache-Control', 'private, max-age=3600');
     response.setHeader('X-Content-Type-Options', 'nosniff');
+    // 图片需被跨源页面嵌入（App webview / H5 开发页与服务端不同源）：
+    // helmet 默认 CORP=same-origin 会导致 <image>/<img> 被拦截而原生
+    // previewImage 却可显示。文件本身受 HMAC 签名+过期时间保护，允许跨源嵌入安全。
+    response.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     return new StreamableFile(
       this.storageService.createReadStream(absolutePath),
     );

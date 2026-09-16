@@ -45,7 +45,8 @@ const PHOTO_KEY_PATTERN =
 
 const BILL_SELECT = `
   SELECT b.id, b.type, b.amount, b.category_id, b.pay_method_id,
-         b.record_date, b.record_time, b.remark, b.book_id, b.created_at, b.updated_at,
+         DATE_FORMAT(b.record_date, '%Y-%m-%d') AS record_date, b.record_time,
+         b.remark, b.book_id, b.created_at, b.updated_at,
          c.name AS category_name, c.icon AS icon_text, c.color AS icon_color, c.bg AS icon_bg,
          p.name AS pay_method_name,
          bk.name AS book_name, u.nickname AS recorder
