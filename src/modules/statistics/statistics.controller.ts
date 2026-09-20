@@ -15,13 +15,15 @@ export class StatisticsController {
   constructor(private readonly statisticsService: StatisticsService) {}
 
   @Get('overview')
-  @ApiOperation({ summary: '月度概览卡（总额/环比/笔数/日均/结余）' })
+  @ApiOperation({
+    summary: '概览卡（总额/环比/笔数/日均/结余）；传 year=YYYY 为年维度（附月均），否则按月',
+  })
   overview(@CurrentUserId() userId: string, @Query() query: OverviewQueryDto) {
     return this.statisticsService.overview(userId, query);
   }
 
   @Get('categories')
-  @ApiOperation({ summary: '月度分类排行' })
+  @ApiOperation({ summary: '分类排行（month 或 year 二选一）' })
   categories(
     @CurrentUserId() userId: string,
     @Query() query: CategoryStatsQueryDto,
@@ -30,7 +32,9 @@ export class StatisticsController {
   }
 
   @Get('pay-methods')
-  @ApiOperation({ summary: '月度支付方式聚合（固定支出口径）' })
+  @ApiOperation({
+    summary: '支付方式聚合（固定支出口径，month 或 year 二选一）',
+  })
   payMethods(
     @CurrentUserId() userId: string,
     @Query() query: PayMethodStatsQueryDto,
@@ -39,7 +43,9 @@ export class StatisticsController {
   }
 
   @Get('trend')
-  @ApiOperation({ summary: '近 N 个月收支趋势（默认 6，3~12）' })
+  @ApiOperation({
+    summary: '收支趋势：months=近 N 个月（默认 6，3~12）；year=YYYY 时返回该年 12 个月',
+  })
   trend(@CurrentUserId() userId: string, @Query() query: TrendQueryDto) {
     return this.statisticsService.trend(userId, query);
   }

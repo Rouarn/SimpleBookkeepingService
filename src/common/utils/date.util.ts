@@ -19,6 +19,15 @@ export function isMonthString(value: string): boolean {
   return /^\d{4}-(0[1-9]|1[0-2])$/.test(value);
 }
 
+/** 当前年份 YYYY */
+export function currentYear(base: Date = new Date()): string {
+  return String(base.getFullYear());
+}
+
+export function isYearString(value: string): boolean {
+  return /^\d{4}$/.test(value);
+}
+
 export function isDateString(value: string): boolean {
   return (
     /^\d{4}-\d{2}-\d{2}$/.test(value) &&
@@ -46,6 +55,49 @@ export function monthRange(month: string): [string, string] {
 /** 某月总天数（2 月按 28/29 处理） */
 export function daysInMonth(year: number, month: number): number {
   return new Date(year, month, 0).getDate();
+}
+
+/** 年份半开区间：['YYYY-01-01', 下一年1月1日]，与 monthRange 同口径 */
+export function yearRange(year: string): [string, string] {
+  const y = Number(year);
+  return [`${y}-01-01`, `${y + 1}-01-01`];
+}
+
+/** 年份平移 delta 年（负数往前） */
+export function shiftYear(year: string, delta: number): string {
+  return String(Number(year) + delta);
+}
+
+/** 某年 1~12 月的 YYYY-MM 序列（升序） */
+export function monthsOfYear(year: string): string[] {
+  return Array.from({ length: 12 }, (_, i) => `${year}-${pad2(i + 1)}`);
+}
+
+/** 闰年判断 */
+export function isLeapYear(year: number): boolean {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+/**
+ * 年内已过月数（年维度日均/月均分母）：当前年取当前月份数；历史年取 12。
+ */
+export function elapsedMonths(year: string, base: Date = new Date()): number {
+  if (year === currentYear(base)) return base.getMonth() + 1;
+  return 12;
+}
+
+/**
+ * 年内已过天数：当前年取今天是年内第几天；历史年取全年天数（365/366）。
+ */
+export function elapsedDaysOfYear(
+  year: string,
+  base: Date = new Date(),
+): number {
+  if (year === currentYear(base)) {
+    const start = new Date(base.getFullYear(), 0, 1);
+    return Math.floor((base.getTime() - start.getTime()) / 86_400_000) + 1;
+  }
+  return isLeapYear(Number(year)) ? 366 : 365;
 }
 
 /** 月份平移 delta 个月 */

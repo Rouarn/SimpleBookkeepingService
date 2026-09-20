@@ -1,14 +1,19 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { round2 } from '../../../common/utils/money.js';
 import {
   currentMonth,
   elapsedDays,
+  elapsedDaysOfYear,
+  elapsedMonths,
   monthLabel,
   monthRange,
+  monthsOfYear,
   recentMonths,
   shiftMonth,
+  shiftYear,
+  yearRange,
 } from '../../../common/utils/date.util.js';
 import type { BillType } from '../../../entities/category.entity.js';
 import { BooksService } from '../../books/services/books.service.js';
@@ -43,6 +48,12 @@ interface Scope {
   params: unknown[];
 }
 
+/** 时间范围：month（YYYY-MM）或 year（YYYY），二选一 */
+interface Period {
+  month?: string;
+  year?: string;
+}
+
 export interface MomVo {
   up: boolean;
   percent: number | null;
@@ -61,7 +72,9 @@ export class StatisticsService {
     userId: string,
     query: OverviewQueryDto,
   ): Promise<{
-    month: string;
+    granularity: 'month' | 'year';
+    month?: string;
+    year?: string;
     type: BillType;
     total: number;
     oppositeTotal: number;
@@ -69,16 +82,17 @@ export class StatisticsService {
     count: number;
     dailyAverage: number;
     elapsedDays: number;
+    monthlyAverage?: number;
+    elapsedMonths?: number;
     mom: MomVo;
   }> {
-    const month = query.month ?? currentMonth();
+    const period = this.resolvePeriod(query);
     const type: BillType = query.type ?? 'expense';
-    const scope = await this.buildScope(userId, month, query.bookId);
-    const prevScope = await this.buildScope(
-      userId,
-      shiftMonth(month, -1),
-      query.bookId,
-    );
+    const scope = await this.buildScope(userId, period, query.bookId);
+    const prevPeriod: Period = period.year
+      ? { year: shiftYear(period.year, -1) }
+      : { month: shiftMonth(period.month!, -1) };
+    const prevScope = await this.buildScope(userId, prevPeriod, query.bookId);
 
     const [current, previous] = await Promise.all([
       this.sumMonth(scope),
@@ -91,11 +105,16 @@ export class StatisticsService {
     const balance = round2(current.income - current.expense);
     const count =
       type === 'expense' ? current.expenseCount : current.incomeCount;
-    const days = elapsedDays(month);
+    // 月维度：日均按已过天数；年维度：日均按年内已过天数，另附月均
+    const days = period.year
+      ? elapsedDaysOfYear(period.year)
+      : elapsedDays(period.month!);
+    const months = period.year ? elapsedMonths(period.year) : 0;
     const prevTotal = round2(previous[type]);
 
     return {
-      month,
+      granularity: period.year ? 'year' : 'month',
+      ...(period.year ? { year: period.year } : { month: period.month }),
       type,
       total,
       oppositeTotal,
@@ -103,6 +122,12 @@ export class StatisticsService {
       count,
       dailyAverage: days > 0 ? round2(total / days) : 0,
       elapsedDays: days,
+      ...(period.year
+        ? {
+            monthlyAverage: months > 0 ? round2(total / months) : 0,
+            elapsedMonths: months,
+          }
+        : {}),
       mom: this.buildMom(total, prevTotal),
     };
   }
@@ -111,7 +136,9 @@ export class StatisticsService {
     userId: string,
     query: CategoryStatsQueryDto,
   ): Promise<{
-    month: string;
+    granularity: 'month' | 'year';
+    month?: string;
+    year?: string;
     type: BillType;
     total: number;
     list: Array<{
@@ -125,9 +152,9 @@ export class StatisticsService {
       percent: number;
     }>;
   }> {
-    const month = query.month ?? currentMonth();
+    const period = this.resolvePeriod(query);
     const type: BillType = query.type ?? 'expense';
-    const scope = await this.buildScope(userId, month, query.bookId, type);
+    const scope = await this.buildScope(userId, period, query.bookId, type);
 
     const [dictMap, rows] = await Promise.all([
       // 历史口径：字典停用后仍需返回原名/图标（04c：JOIN 不过滤状态）
@@ -158,7 +185,8 @@ export class StatisticsService {
     const total = round2(list.reduce((sum, item) => sum + item.amount, 0));
 
     return {
-      month,
+      granularity: period.year ? 'year' : 'month',
+      ...(period.year ? { year: period.year } : { month: period.month }),
       type,
       total,
       list: list.map((item) => ({
@@ -172,7 +200,9 @@ export class StatisticsService {
     userId: string,
     query: PayMethodStatsQueryDto,
   ): Promise<{
-    month: string;
+    granularity: 'month' | 'year';
+    month?: string;
+    year?: string;
     total: number;
     list: Array<{
       payMethodId: string;
@@ -185,9 +215,9 @@ export class StatisticsService {
       percent: number;
     }>;
   }> {
-    const month = query.month ?? currentMonth();
+    const period = this.resolvePeriod(query);
     // 固定支出口径（04d §3）
-    const scope = await this.buildScope(userId, month, query.bookId, 'expense');
+    const scope = await this.buildScope(userId, period, query.bookId, 'expense');
 
     const [dictMap, rows] = await Promise.all([
       // 历史口径：含停用支付方式（04c：JOIN 不过滤状态）
@@ -218,7 +248,8 @@ export class StatisticsService {
     const total = round2(list.reduce((sum, item) => sum + item.amount, 0));
 
     return {
-      month,
+      granularity: period.year ? 'year' : 'month',
+      ...(period.year ? { year: period.year } : { month: period.month }),
       total,
       list: list.map((item) => ({
         ...item,
@@ -231,7 +262,9 @@ export class StatisticsService {
     userId: string,
     query: TrendQueryDto,
   ): Promise<{
-    months: number;
+    granularity: 'month' | 'year';
+    months?: number;
+    year?: string;
     list: Array<{
       month: string;
       label: string;
@@ -239,11 +272,13 @@ export class StatisticsService {
       income: number;
     }>;
   }> {
-    const count = query.months ?? 6;
     if (query.bookId)
       await this.booksService.getOwnedBookOrFail(userId, query.bookId);
 
-    const sequence = recentMonths(count);
+    // 月维度：包含当前月向前推 N 个月；年维度：该年 1~12 月固定 12 档
+    const sequence = query.year
+      ? monthsOfYear(query.year)
+      : recentMonths(query.months ?? 6);
     const [start] = monthRange(sequence[0]);
     const [, end] = monthRange(sequence[sequence.length - 1]);
 
@@ -265,15 +300,26 @@ export class StatisticsService {
       ]),
     );
 
-    return {
-      months: count,
-      list: sequence.map((month) => ({
-        month,
-        label: monthLabel(month),
-        expense: amountMap.get(month)?.expense ?? 0,
-        income: amountMap.get(month)?.income ?? 0,
-      })),
-    };
+    const list = sequence.map((month) => ({
+      month,
+      label: monthLabel(month),
+      expense: amountMap.get(month)?.expense ?? 0,
+      income: amountMap.get(month)?.income ?? 0,
+    }));
+
+    return query.year
+      ? { granularity: 'year', year: query.year, list }
+      : { granularity: 'month', months: query.months ?? 6, list };
+  }
+
+  /**
+   * 解析 month/year 时间范围：二选一，同时传入直接拒绝；均缺省默认当前月。
+   */
+  private resolvePeriod(query: { month?: string; year?: string }): Period {
+    if (query.month && query.year)
+      throw new BadRequestException('month 与 year 不可同时传入');
+    if (query.year) return { year: query.year };
+    return { month: query.month ?? currentMonth() };
   }
 
   /** 全量分类字典（含停用项，历史统计可追溯）。 */
@@ -351,12 +397,15 @@ export class StatisticsService {
 
   private async buildScope(
     userId: string,
-    month: string,
+    period: Period,
     bookId?: string,
     type?: BillType,
   ): Promise<Scope> {
     if (bookId) await this.booksService.getOwnedBookOrFail(userId, bookId);
-    const [start, end] = monthRange(month);
+    // 年维度用全年半开区间，月维度用单月半开区间（禁止 DATE_FORMAT 进 WHERE）
+    const [start, end] = period.year
+      ? yearRange(period.year)
+      : monthRange(period.month ?? currentMonth());
     const conditions = [
       'b.user_id = ?',
       'b.record_date >= ?',
