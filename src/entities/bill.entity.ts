@@ -82,10 +82,21 @@ export class Bill {
   @Column({ type: 'varchar', length: 50, default: '' })
   remark: string;
 
-  @CreateDateColumn({ type: 'datetime', precision: 3, name: 'created_at' })
+  @CreateDateColumn({
+    type: 'datetime',
+    precision: 3,
+    name: 'created_at',
+    default: () => 'CURRENT_TIMESTAMP(3)',
+  })
   createdAt: Date;
 
-  @UpdateDateColumn({ type: 'datetime', precision: 3, name: 'updated_at' })
+  @UpdateDateColumn({
+    type: 'datetime',
+    precision: 3,
+    name: 'updated_at',
+    default: () => 'CURRENT_TIMESTAMP(3)',
+    onUpdate: 'CURRENT_TIMESTAMP(3)',
+  })
   updatedAt: Date;
 
   /** 预留软删，v1 删除为物理删除 */

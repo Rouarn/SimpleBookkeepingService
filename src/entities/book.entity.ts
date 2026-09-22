@@ -46,10 +46,21 @@ export class Book {
   @Column({ type: 'int', name: 'sort_order', default: 0 })
   sortOrder: number;
 
-  @CreateDateColumn({ type: 'datetime', precision: 3, name: 'created_at' })
+  @CreateDateColumn({
+    type: 'datetime',
+    precision: 3,
+    name: 'created_at',
+    default: () => 'CURRENT_TIMESTAMP(3)',
+  })
   createdAt: Date;
 
-  @UpdateDateColumn({ type: 'datetime', precision: 3, name: 'updated_at' })
+  @UpdateDateColumn({
+    type: 'datetime',
+    precision: 3,
+    name: 'updated_at',
+    default: () => 'CURRENT_TIMESTAMP(3)',
+    onUpdate: 'CURRENT_TIMESTAMP(3)',
+  })
   updatedAt: Date;
 
   /** 预留软删字段，v1 不启用 */

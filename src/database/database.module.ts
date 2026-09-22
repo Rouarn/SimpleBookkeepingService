@@ -15,7 +15,9 @@ import { OperationLog } from '../entities/operation-log.entity.js';
 
 /**
  * TypeORM 全局模块（05 §1）。
- * synchronize 永久关闭，表结构只经迁移演进（02 §5）。
+ * 表结构同步策略：
+ *   - 开发环境：synchronize 开启，实体改动后启动即自动建表/加字段/改索引；
+ *   - 生产环境：synchronize 永久关闭，表结构变更在上线前手动执行 DDL。
  * 全部 9 实体在根模块一次性注册：service 层全部用 raw SQL（dataSource.query），
  * 不走 Repository，故不需要 autoLoadEntities / forFeature 分散注册。
  */
@@ -25,6 +27,7 @@ import { OperationLog } from '../entities/operation-log.entity.js';
     TypeOrmModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => {
+        const appConfig = configService.get<AppConfig['app']>('app')!;
         const dbConfig = configService.get<AppConfig['database']>('database')!;
         return {
           type: 'mysql' as const,
@@ -47,7 +50,8 @@ import { OperationLog } from '../entities/operation-log.entity.js';
             OperationLog,
           ],
           namingStrategy: new SnakeNamingStrategy(),
-          synchronize: false,
+          // 开发环境自动同步表结构；生产环境关闭，DDL 手动执行
+          synchronize: !appConfig.isProduction,
           migrationsRun: false,
           logging: ['error', 'warn'],
           extra: {

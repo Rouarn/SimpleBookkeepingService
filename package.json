@@ -15,12 +15,7 @@
     "start:prod": "NODE_ENV=production node dist/main.js",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint --type-aware src/",
-    "format": "prettier --write \"src/**/*.ts\"",
-    "migration:build": "nest build",
-    "migration:run": "nest build && typeorm migration:run -d dist/database/data-source.js",
-    "migration:run:prod": "typeorm migration:run -d dist/database/data-source.js",
-    "migration:revert": "typeorm migration:revert -d dist/database/data-source.js",
-    "migration:generate": "nest build && typeorm migration:generate -d dist/database/data-source.js"
+    "format": "prettier --write \"src/**/*.ts\""
   },
   "dependencies": {
     "@nestjs/common": "^12.0.3",

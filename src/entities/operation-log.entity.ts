@@ -42,6 +42,11 @@ export class OperationLog {
   @Column({ type: 'int', unsigned: true, name: 'cost_ms', default: 0 })
   costMs: number;
 
-  @CreateDateColumn({ type: 'datetime', precision: 3, name: 'created_at' })
+  @CreateDateColumn({
+    type: 'datetime',
+    precision: 3,
+    name: 'created_at',
+    default: () => 'CURRENT_TIMESTAMP(3)',
+  })
   createdAt: Date;
 }

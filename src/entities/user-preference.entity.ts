@@ -126,6 +126,12 @@ export class UserPreference {
   @JoinColumn({ name: 'last_category_income_id' })
   lastCategoryIncome?: Category | null;
 
-  @UpdateDateColumn({ type: 'datetime', precision: 3, name: 'updated_at' })
+  @UpdateDateColumn({
+    type: 'datetime',
+    precision: 3,
+    name: 'updated_at',
+    default: () => 'CURRENT_TIMESTAMP(3)',
+    onUpdate: 'CURRENT_TIMESTAMP(3)',
+  })
   updatedAt: Date;
 }

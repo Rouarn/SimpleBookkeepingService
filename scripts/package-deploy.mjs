@@ -14,7 +14,7 @@
  *   cd /opt/bookkeeping
  *   pnpm install --prod --frozen-lockfile
  *   cp .env.example .env.production   # 按实际环境修改
- *   NODE_ENV=production pnpm migration:run:prod
+ *   # 表结构变更需在生产库手动执行 DDL（开发环境由 TypeORM synchronize 自动同步）
  *   pnpm start:prod
  */
 import { spawnSync } from 'node:child_process';

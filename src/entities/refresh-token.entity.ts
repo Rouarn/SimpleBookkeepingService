@@ -58,6 +58,11 @@ export class RefreshToken {
   })
   lastUsedAt: Date | null;
 
-  @CreateDateColumn({ type: 'datetime', precision: 3, name: 'created_at' })
+  @CreateDateColumn({
+    type: 'datetime',
+    precision: 3,
+    name: 'created_at',
+    default: () => 'CURRENT_TIMESTAMP(3)',
+  })
   createdAt: Date;
 }

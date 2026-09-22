@@ -36,6 +36,11 @@ export class BillPhoto {
   @Column({ type: 'tinyint', unsigned: true, name: 'sort_order', default: 0 })
   sortOrder: number;
 
-  @CreateDateColumn({ type: 'datetime', precision: 3, name: 'created_at' })
+  @CreateDateColumn({
+    type: 'datetime',
+    precision: 3,
+    name: 'created_at',
+    default: () => 'CURRENT_TIMESTAMP(3)',
+  })
   createdAt: Date;
 }
