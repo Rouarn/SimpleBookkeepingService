@@ -217,7 +217,12 @@ export class StatisticsService {
   }> {
     const period = this.resolvePeriod(query);
     // 固定支出口径（04d §3）
-    const scope = await this.buildScope(userId, period, query.bookId, 'expense');
+    const scope = await this.buildScope(
+      userId,
+      period,
+      query.bookId,
+      'expense',
+    );
 
     const [dictMap, rows] = await Promise.all([
       // 历史口径：含停用支付方式（04c：JOIN 不过滤状态）

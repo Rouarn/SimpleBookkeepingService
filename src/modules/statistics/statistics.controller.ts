@@ -16,7 +16,8 @@ export class StatisticsController {
 
   @Get('overview')
   @ApiOperation({
-    summary: '概览卡（总额/环比/笔数/日均/结余）；传 year=YYYY 为年维度（附月均），否则按月',
+    summary:
+      '概览卡（总额/环比/笔数/日均/结余）；传 year=YYYY 为年维度（附月均），否则按月',
   })
   overview(@CurrentUserId() userId: string, @Query() query: OverviewQueryDto) {
     return this.statisticsService.overview(userId, query);
@@ -44,7 +45,8 @@ export class StatisticsController {
 
   @Get('trend')
   @ApiOperation({
-    summary: '收支趋势：months=近 N 个月（默认 6，3~12）；year=YYYY 时返回该年 12 个月',
+    summary:
+      '收支趋势：months=近 N 个月（默认 6，3~12）；year=YYYY 时返回该年 12 个月',
   })
   trend(@CurrentUserId() userId: string, @Query() query: TrendQueryDto) {
     return this.statisticsService.trend(userId, query);

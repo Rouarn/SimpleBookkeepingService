@@ -7,15 +7,15 @@
   "license": "UNLICENSED",
   "type": "module",
   "scripts": {
-    "build": "nest build",
-    "package:deploy": "node scripts/package-deploy.mjs",
     "start": "nest start",
     "start:dev": "NODE_ENV=development nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "NODE_ENV=production node dist/main.js",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint --type-aware src/",
-    "format": "prettier --write \"src/**/*.ts\""
+    "format": "prettier --write \"src/**/*.ts\"",
+    "build": "nest build",
+    "package:deploy": "node scripts/package-deploy.mjs"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.3",
