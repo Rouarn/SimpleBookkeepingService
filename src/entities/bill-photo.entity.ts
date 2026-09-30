@@ -10,7 +10,7 @@ import {
 import { Bill } from './bill.entity.js';
 
 /** 账单凭证图片（02 §2.7），每账单最多 3 张；url 只存相对路径 key。 */
-@Entity('bill_photos')
+@Entity('bill_photos', { comment: '账单凭证图片' })
 @Index('uk_bill_sort', ['billId', 'sortOrder'], { unique: true })
 @Index('idx_user', ['userId'])
 export class BillPhoto {

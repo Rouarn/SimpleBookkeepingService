@@ -8,7 +8,7 @@ import {
 } from 'typeorm';
 
 /** 用户表（02 §2.1）。实体不作为接口出参，必须经 VO 序列化。 */
-@Entity('users')
+@Entity('users', { comment: '用户表' })
 export class User {
   @PrimaryGeneratedColumn({ type: 'bigint', unsigned: true })
   id: string;

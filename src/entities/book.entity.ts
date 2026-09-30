@@ -11,7 +11,7 @@ import {
 import { User } from './user.entity.js';
 
 /** 账本表（02 §2.3）。 */
-@Entity('books')
+@Entity('books', { comment: '账本表' })
 @Index('idx_user_sort', ['userId', 'sortOrder', 'id'])
 export class Book {
   @PrimaryGeneratedColumn({ type: 'bigint', unsigned: true })

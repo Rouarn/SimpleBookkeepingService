@@ -10,7 +10,7 @@ import {
 import { User } from './user.entity.js';
 
 /** 刷新令牌（02 §2.2）：库中只存 SHA256，支持轮换、吊销与重用检测。 */
-@Entity('refresh_tokens')
+@Entity('refresh_tokens', { comment: '刷新令牌' })
 @Index('idx_user_expire', ['userId', 'expiresAt'])
 export class RefreshToken {
   @PrimaryGeneratedColumn({ type: 'bigint', unsigned: true })

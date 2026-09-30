@@ -8,7 +8,7 @@ import {
 } from 'typeorm';
 
 /** 支付方式字典（02 §2.5）。 */
-@Entity('pay_methods')
+@Entity('pay_methods', { comment: '收/付款方式字典' })
 export class PayMethod {
   @PrimaryGeneratedColumn({ type: 'bigint', unsigned: true })
   id: string;

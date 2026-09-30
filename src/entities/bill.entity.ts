@@ -15,7 +15,7 @@ import { PayMethod } from './pay-method.entity.js';
 import { User } from './user.entity.js';
 
 /** 账单流水核心表（02 §2.6）。金额 DECIMAL 恒正，方向由 type 表达。 */
-@Entity('bills')
+@Entity('bills', { comment: '账单流水表' })
 @Index('idx_user_datetime', ['userId', 'recordDate', 'recordTime', 'createdAt'])
 @Index('idx_user_type_date', ['userId', 'type', 'recordDate'])
 @Index('idx_book_date', ['bookId', 'recordDate'])

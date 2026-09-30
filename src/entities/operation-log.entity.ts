@@ -7,7 +7,7 @@ import {
 } from 'typeorm';
 
 /** 请求审计日志（02 §2.9）：只记元数据，不记请求体/响应体。 */
-@Entity('operation_logs')
+@Entity('operation_logs', { comment: '请求审计日志(只追加,定期归档)' })
 @Index('idx_user_time', ['userId', 'createdAt'])
 @Index('idx_trace', ['traceId'])
 @Index('idx_created', ['createdAt'])

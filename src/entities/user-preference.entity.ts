@@ -16,7 +16,7 @@ export type FlowType = 'ALL' | 'EXPENSE' | 'INCOME';
 export type ExpenseIncome = 'expense' | 'income';
 
 /** 用户 UI 偏好（02 §2.8），对应用户端 app.js，每用户唯一一行。 */
-@Entity('user_preferences')
+@Entity('user_preferences', { comment: '用户偏好设置' })
 export class UserPreference {
   @PrimaryGeneratedColumn({ type: 'bigint', unsigned: true })
   id: string;

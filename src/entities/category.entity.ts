@@ -10,7 +10,7 @@ import {
 export type BillType = 'expense' | 'income';
 
 /** 收支分类字典（02 §2.4），系统种子数据、全局只读。 */
-@Entity('categories')
+@Entity('categories', { comment: '收支分类字典(系统种子数据)' })
 @Index('idx_type_sort', ['type', 'status', 'sortOrder'])
 @Index('uk_type_name', ['type', 'name'], { unique: true })
 export class Category {
