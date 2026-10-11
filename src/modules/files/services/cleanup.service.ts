@@ -10,10 +10,13 @@ import {
   REDIS_CLIENT,
   REDIS_KEYS,
 } from '../../../common/redis/redis.constants.js';
+import { CronLockService } from '../../../common/cron/cron-lock.service.js';
 import { StorageService } from './storage.service.js';
 
 const ORPHAN_RETENTION_MS = 24 * 60 * 60_000; // 未被账单引用的孤儿文件 24h
 const TOMBSTONE_RETENTION_SECONDS = 7 * 24 * 60 * 60; // 误删申诉窗口 7 天
+/** 选主锁 TTL 兜底（P1-20）：按任务预估时长 10 分钟 */
+const CLEANUP_LOCK_TTL_SECONDS = 10 * 60;
 
 /**
  * 磁盘文件每日回收（04c §三·资源回收）：
@@ -28,6 +31,7 @@ export class CleanupService {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
+    private readonly cronLock: CronLockService,
     private readonly storageService: StorageService,
   ) {}
 
@@ -43,13 +47,20 @@ export class CleanupService {
 
   @Cron('30 3 * * *', { name: 'files-cleanup' })
   async handleCleanup(): Promise<void> {
-    try {
-      await this.cleanBills();
-      await this.cleanAvatars();
-      await this.checkDiskSpace();
-    } catch (error) {
-      this.logger.error(`清理任务失败: ${(error as Error).message}`);
-    }
+    // 多实例选主锁（P1-20）：同一时刻仅一个实例执行，其余实例跳过
+    await this.cronLock.runWithLock(
+      'files-cleanup',
+      CLEANUP_LOCK_TTL_SECONDS,
+      async () => {
+        try {
+          await this.cleanBills();
+          await this.cleanAvatars();
+          await this.checkDiskSpace();
+        } catch (error) {
+          this.logger.error(`清理任务失败: ${(error as Error).message}`);
+        }
+      },
+    );
   }
 
   private async addTombstone(redisKey: string, keys: string[]): Promise<void> {

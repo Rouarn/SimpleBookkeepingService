@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, QueryFailedError } from 'typeorm';
 import bcrypt from 'bcrypt';
@@ -44,6 +44,8 @@ export type AuthResult = TokenPair & { user: AuthUserVo };
  */
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger('AuthService');
+
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
@@ -129,8 +131,18 @@ export class AuthService {
   /** 登录：手机号维度失败计数锁定（5 次/15 分钟，40103），错误文案统一防枚举。 */
   async login(dto: LoginDto): Promise<AuthResult> {
     const failKey = REDIS_KEYS.loginFailPhone(dto.phone);
-    const failCount = Number((await this.redis.get(failKey)) ?? 0);
-    if (failCount >= LOGIN_FAIL_LIMIT) {
+    // Redis 故障降级（P1-04）：锁定计数读写失败时不拒绝业务
+    // （宁可不锁，不可拒业务），仅记录告警并正常走密码校验。
+    let locked = false;
+    try {
+      const failCount = Number((await this.redis.get(failKey)) ?? 0);
+      locked = failCount >= LOGIN_FAIL_LIMIT;
+    } catch (error) {
+      this.logger.warn(
+        `登录失败计数读取失败，跳过锁定判定: ${(error as Error).message}`,
+      );
+    }
+    if (locked) {
       throw new BusinessException(
         ERROR_CODES.LOGIN_TOO_MANY.code,
         ERROR_CODES.LOGIN_TOO_MANY.httpStatus,
@@ -148,8 +160,14 @@ export class AuthService {
     );
 
     if (!user || !passwordMatched) {
-      const next = await this.redis.incr(failKey);
-      if (next === 1) await this.redis.pexpire(failKey, LOGIN_FAIL_WINDOW_MS);
+      try {
+        const next = await this.redis.incr(failKey);
+        if (next === 1) await this.redis.pexpire(failKey, LOGIN_FAIL_WINDOW_MS);
+      } catch (error) {
+        this.logger.warn(
+          `登录失败计数写入失败，本次跳过计数: ${(error as Error).message}`,
+        );
+      }
       throw new BusinessException(
         ERROR_CODES.PARAM_INVALID.code,
         ERROR_CODES.PARAM_INVALID.httpStatus,
@@ -165,7 +183,12 @@ export class AuthService {
       );
     }
 
-    await this.redis.del(failKey);
+    // 登录成功清零失败计数；Redis 故障时降级为不清零（计数有 15 分钟窗口自然过期）
+    try {
+      await this.redis.del(failKey);
+    } catch (error) {
+      this.logger.warn(`登录失败计数清零失败: ${(error as Error).message}`);
+    }
     const loginAt = new Date();
     await this.dataSource.query(
       'UPDATE users SET last_login_at = NOW(3) WHERE id = ?',

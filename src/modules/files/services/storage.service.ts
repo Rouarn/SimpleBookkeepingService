@@ -9,7 +9,7 @@ import {
   access,
   writeFile,
 } from 'node:fs/promises';
-import { createReadStream, existsSync } from 'node:fs';
+import { createReadStream } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { AppConfig } from '../../../config/configuration.js';
@@ -140,8 +140,10 @@ export class StorageService implements OnModuleInit {
   /**
    * key 归一化与目录穿越防护：白名单正则 + resolve 后必须仍在 ROOT 内。
    * 返回绝对路径；文件不存在返回 null（由调用方决定 404）。
+   * 存在性检查用异步 access 替代同步 existsSync：图片端点为全站最高频
+   * 端点，同步磁盘 IO 在磁盘繁忙时会阻塞事件循环。
    */
-  resolveExistingFile(key: string): string | null {
+  async resolveExistingFile(key: string): Promise<string | null> {
     if (!KEY_PATTERN.test(key)) return null;
     const decoded = this.safeDecode(key);
     if (!decoded) return null;
@@ -150,7 +152,12 @@ export class StorageService implements OnModuleInit {
     if (absolute !== this.rootDir && !absolute.startsWith(this.rootDir + sep)) {
       return null;
     }
-    return existsSync(absolute) ? absolute : null;
+    try {
+      await access(absolute, fsConstants.R_OK);
+      return absolute;
+    } catch {
+      return null;
+    }
   }
 
   createReadStream(absolutePath: string): ReturnType<typeof createReadStream> {

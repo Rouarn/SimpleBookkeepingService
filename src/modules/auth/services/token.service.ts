@@ -8,6 +8,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { AppConfig } from '../../../config/configuration.js';
 import { BusinessException } from '../../../common/exceptions/business.exception.js';
 import { ERROR_CODES } from '../../../common/exceptions/error-codes.js';
+import { CronLockService } from '../../../common/cron/cron-lock.service.js';
+
+/** 选主锁 TTL 兜底（P1-20）：按任务预估时长 10 分钟 */
+const PURGE_LOCK_TTL_SECONDS = 10 * 60;
 
 export interface TokenDeviceInfo {
   deviceId?: string;
@@ -63,6 +67,7 @@ export class TokenService {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
+    private readonly cronLock: CronLockService,
   ) {
     this.jwtConfig = this.configService.get<AppConfig['jwt']>('jwt')!;
   }
@@ -186,19 +191,29 @@ export class TokenService {
    */
   @Cron('45 3 * * *', { name: 'refresh-tokens-purge' })
   async purgeExpired(): Promise<void> {
-    try {
-      const result = await this.dataSource.query(
-        `DELETE FROM refresh_tokens
-          WHERE expires_at < NOW(3)
-             OR (revoked_at IS NOT NULL AND revoked_at < DATE_SUB(NOW(3), INTERVAL 30 DAY))`,
-      );
-      const affected = (result as { affectedRows?: number }).affectedRows ?? 0;
-      if (affected > 0) {
-        this.logger.log(`清理过期/吊销 refresh token ${affected} 行`);
-      }
-    } catch (error) {
-      this.logger.error(`refresh token 清理失败: ${(error as Error).message}`);
-    }
+    // 多实例选主锁（P1-20）：同一时刻仅一个实例执行，其余实例跳过
+    await this.cronLock.runWithLock(
+      'refresh-tokens-purge',
+      PURGE_LOCK_TTL_SECONDS,
+      async () => {
+        try {
+          const result = await this.dataSource.query(
+            `DELETE FROM refresh_tokens
+              WHERE expires_at < NOW(3)
+                 OR (revoked_at IS NOT NULL AND revoked_at < DATE_SUB(NOW(3), INTERVAL 30 DAY))`,
+          );
+          const affected =
+            (result as { affectedRows?: number }).affectedRows ?? 0;
+          if (affected > 0) {
+            this.logger.log(`清理过期/吊销 refresh token ${affected} 行`);
+          }
+        } catch (error) {
+          this.logger.error(
+            `refresh token 清理失败: ${(error as Error).message}`,
+          );
+        }
+      },
+    );
   }
 
   /** 登出：携带 refresh 则吊销；非法/过期直接幂等成功。 */

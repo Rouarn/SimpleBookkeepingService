@@ -112,7 +112,7 @@ export class BooksService {
 
   /** 切换激活账本。 */
   async setActive(userId: string, bookId: string): Promise<BookVm> {
-    await this.getOwnedBookOrFail(userId, bookId);
+    await this.assertOwnedBook(userId, bookId);
     await this.dataSource.query(
       'UPDATE user_preferences SET active_book_id = ? WHERE user_id = ?',
       [bookId, userId],
@@ -131,7 +131,7 @@ export class BooksService {
     bookId: string,
     dto: UpdateBookDto,
   ): Promise<BookVm> {
-    await this.getOwnedBookOrFail(userId, bookId);
+    await this.assertOwnedBook(userId, bookId);
 
     const sets: string[] = [];
     const params: Array<string | number> = [];
@@ -193,7 +193,7 @@ export class BooksService {
           ERROR_CODES.MIGRATE_TARGET_INVALID.message,
         );
       }
-      await this.getOwnedBookOrFail(userId, migrateBookId);
+      await this.assertOwnedBook(userId, migrateBookId);
     }
 
     const migratedBillCount = await this.dataSource.transaction(
@@ -237,7 +237,20 @@ export class BooksService {
   }
 
   /**
-   * 账本归属校验（账单模块复用）：不存在或不属于当前用户统一 40401。
+   * 高频归属校验（轻量）：仅判存在性，不做 bill_count 聚合子查询。
+   * 供账单写入、统计等只验归属的路径复用；不存在或不属于当前用户统一 40401。
+   */
+  async assertOwnedBook(userId: string, bookId: string): Promise<void> {
+    const rows = await this.dataSource.query<Array<{ ok: number }>>(
+      'SELECT 1 AS ok FROM books WHERE id = ? AND user_id = ? AND deleted_at IS NULL LIMIT 1',
+      [bookId, userId],
+    );
+    if (!rows[0]) bookNotFound();
+  }
+
+  /**
+   * 账本归属校验（需完整行）：返回行含 bill_count 聚合，
+   * 仅保留给真正依赖行字段（如 is_default）的路径；纯归属校验请用 assertOwnedBook。
    */
   async getOwnedBookOrFail(userId: string, bookId: string): Promise<BookRow> {
     const rows = await this.dataSource.query<BookRow[]>(

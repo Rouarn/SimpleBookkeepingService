@@ -276,10 +276,12 @@ export class DictionarySeedService implements OnApplicationBootstrap {
       }
     });
 
-    // 清理可能残留的分类缓存（首次启动通常为空，保险起见）
+    // 清理可能残留的分类缓存（含统计用全量字典；首次启动通常为空，保险起见）
     await this.redis.del(
       REDIS_KEYS.dictCategories('expense'),
       REDIS_KEYS.dictCategories('income'),
+      REDIS_KEYS.dictCategoriesAll('expense'),
+      REDIS_KEYS.dictCategoriesAll('income'),
     );
 
     this.logger.log(`categories 种子写入完成，共 ${CATEGORY_SEEDS.length} 条`);
@@ -305,7 +307,10 @@ export class DictionarySeedService implements OnApplicationBootstrap {
       }
     });
 
-    await this.redis.del(REDIS_KEYS.dictPayMethods);
+    await this.redis.del(
+      REDIS_KEYS.dictPayMethods,
+      REDIS_KEYS.dictPayMethodsAll,
+    );
 
     this.logger.log(
       `pay_methods 种子写入完成，共 ${PAY_METHOD_SEEDS.length} 条`,

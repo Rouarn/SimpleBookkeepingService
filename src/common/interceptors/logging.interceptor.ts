@@ -3,6 +3,7 @@ import {
   type ExecutionContext,
   HttpException,
   Injectable,
+  Logger,
   type NestInterceptor,
 } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
@@ -19,14 +20,22 @@ interface RequestWithMeta {
   user?: AuthUser;
 }
 
+/** 未登录（40100）/token 过期（40101）：探测流量不落审计 */
+const SKIP_BIZ_CODES = new Set([40100, 40101]);
+
 /**
  * 最外层拦截器（05 §4）：
  * 1. 生成/透传 traceId（X-Request-Id，32 位 hex），响应头原样回传；
  * 2. 经 AsyncLocalStorage 在整条调用链透传；
  * 3. 结束后异步落 operation_logs 审计（只记元数据，不记请求/响应体，失败仅告警）。
+ *    审计瘦身（防写放大与审计表被恶意灌爆）：签名图片 GET（全站最高频端点）、
+ *    429 限流、401/40100/40101 未登录探测、OPTIONS 预检不落库。
+ *    归档建议：审计表定期归档，线上仅保留 90 天。
  */
 @Injectable()
 export class LoggingInterceptor implements NestInterceptor {
+  private readonly logger = new Logger('LoggingInterceptor');
+
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
@@ -87,6 +96,20 @@ export class LoggingInterceptor implements NestInterceptor {
               .originalUrl ?? '';
           const path = fullPath.split('?')[0];
           const httpStatus = resolvedStatus;
+
+          // 审计瘦身：高频/无价值流量不落 operation_logs，其余保持原逻辑。
+          // resolvedStatus/bizCode 已在 tap error 中捕获，finalize 阶段可信；
+          // 401 同时覆盖业务码（40100/40101）与裸 HTTP 401（如守卫直接拒绝）。
+          if (
+            method === 'OPTIONS' ||
+            (method === 'GET' && path.startsWith('/api/v1/files/')) ||
+            httpStatus === 429 ||
+            httpStatus === 401 ||
+            SKIP_BIZ_CODES.has(bizCode)
+          ) {
+            return;
+          }
+
           const userAgentHeader = request.headers['user-agent'];
           const userAgent =
             (Array.isArray(userAgentHeader)
@@ -110,8 +133,9 @@ export class LoggingInterceptor implements NestInterceptor {
                 costMs,
               ],
             )
-            .catch(() => {
-              // 审计失败只告警，不影响主流程（06 §5.3）
+            .catch((error: unknown) => {
+              // 审计失败只告警不抛出，不影响主流程（06 §5.3）
+              this.logger.warn(`审计日志写入失败: ${(error as Error).message}`);
             });
         }),
       ),

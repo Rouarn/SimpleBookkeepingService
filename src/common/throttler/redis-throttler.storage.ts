@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { ThrottlerStorage } from '@nestjs/throttler';
 import { Redis } from 'ioredis';
 import { randomUUID } from 'node:crypto';
@@ -19,6 +19,8 @@ interface StorageRecord {
  */
 @Injectable()
 export class RedisThrottlerStorage implements ThrottlerStorage {
+  private readonly logger = new Logger('RedisThrottlerStorage');
+
   constructor(@Inject(REDIS_CLIENT) private readonly redis: Redis) {}
 
   async increment(
@@ -32,14 +34,31 @@ export class RedisThrottlerStorage implements ThrottlerStorage {
     const now = Date.now();
     const windowStart = now - ttl;
 
-    const results = (await this.redis
-      .multi()
-      .zremrangebyscore(redisKey, 0, windowStart)
-      .zadd(redisKey, now, `${now}:${randomUUID()}`)
-      .zcard(redisKey)
-      .zrange(redisKey, '0', '0', 'WITHSCORES')
-      .pexpire(redisKey, ttl)
-      .exec()) as Array<[Error | null, unknown]>;
+    let results: Array<[Error | null, unknown]>;
+    try {
+      results = (await this.redis
+        .multi()
+        .zremrangebyscore(redisKey, 0, windowStart)
+        .zadd(redisKey, now, `${now}:${randomUUID()}`)
+        .zcard(redisKey)
+        .zrange(redisKey, '0', '0', 'WITHSCORES')
+        .pexpire(redisKey, ttl)
+        .exec()) as Array<[Error | null, unknown]>;
+    } catch (error) {
+      // Redis 故障时限流 fail-open（P1-04）：全局限流守卫先于 JWT，
+      // 每个请求必经此处，抛异常会把 Redis 故障放大成全站 5xx；
+      // 降级为「本次未计数、直接放行」（isBlocked=false 即放行语义），
+      // 故障恢复后窗口计数自动重新累积。
+      this.logger.warn(
+        `限流计数失败（key=${redisKey}），降级放行: ${(error as Error).message}`,
+      );
+      return {
+        totalHits: 0,
+        timeToExpire: 0,
+        isBlocked: false,
+        timeToBlockExpire: 0,
+      };
+    }
 
     const totalHits = Number(results[2]?.[1] ?? 0);
     const oldestPair = results[3]?.[1] as [string?, string?] | undefined;

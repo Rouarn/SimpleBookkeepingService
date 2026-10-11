@@ -12,6 +12,8 @@ import type { Redis } from 'ioredis';
 import { RedisModule } from './redis/redis.module.js';
 import { REDIS_CLIENT } from './redis/redis.constants.js';
 import { RedisThrottlerStorage } from './throttler/redis-throttler.storage.js';
+import { CronLockService } from './cron/cron-lock.service.js';
+import { AuditCleanupService } from './cron/audit-cleanup.service.js';
 import { THROTTLE_NAMES, THROTTLE_RATES } from './throttler/throttle-rates.js';
 import { CustomThrottlerGuard } from './throttler/custom-throttler.guard.js';
 import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
@@ -86,6 +88,8 @@ import type { AppConfig } from '../config/configuration.js';
   ],
   providers: [
     RedisThrottlerStorage,
+    CronLockService,
+    AuditCleanupService,
     AllExceptionsFilter,
     LoggingInterceptor,
     TransformInterceptor,
@@ -97,6 +101,6 @@ import type { AppConfig } from '../config/configuration.js';
     { provide: APP_INTERCEPTOR, useClass: TransformInterceptor },
     CustomThrottlerGuard,
   ],
-  exports: [RedisModule, JwtModule, RedisThrottlerStorage],
+  exports: [RedisModule, JwtModule, RedisThrottlerStorage, CronLockService],
 })
 export class CommonModule {}

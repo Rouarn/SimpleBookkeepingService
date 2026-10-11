@@ -6,17 +6,17 @@ import {
   StreamableFile,
   UseGuards,
 } from '@nestjs/common';
-import type { Request, Response } from 'express';
+import type { Response } from 'express';
 import { ApiExcludeController, ApiOperation } from '@nestjs/swagger';
 import { Public } from '../../common/decorators/public.decorator.js';
-import { FileSignGuard } from './guards/file-sign.guard.js';
+import { FileSignGuard, type FileSignRequest } from './guards/file-sign.guard.js';
 import { StorageService } from './services/storage.service.js';
-
-const FILES_PREFIX = '/api/v1/files/';
 
 /**
  * 文件读取（04c §11）：@Public 但由 FileSignGuard 校验 HMAC 签名，
  * 通过后流式输出 image/jpeg。uni-app <image> 无法带 Bearer，故用签名 URL。
+ * 守卫已完成路径解析与存在性检查并把绝对路径挂到 request，这里直接复用，
+ * 不再重复解析 key 或做第二次同步磁盘检查。
  */
 @Public()
 @UseGuards(FileSignGuard)
@@ -28,14 +28,11 @@ export class FilesController {
   @Get('{*key}')
   @ApiOperation({ summary: '签名访问图片文件' })
   serve(
-    @Req() request: Request,
+    @Req() request: FileSignRequest,
     @Res({ passthrough: true }) response: Response,
   ): StreamableFile {
-    const url = request.originalUrl ?? request.url ?? '';
-    const key = decodeURIComponent(
-      (url.split('?')[0] ?? '').slice(FILES_PREFIX.length),
-    );
-    const absolutePath = this.storageService.resolveExistingFile(key);
+    // 守卫已保证文件存在；此处兜底仅防极端竞态（放行后文件被删），无磁盘 IO
+    const absolutePath = request.fileAbsolutePath;
     if (!absolutePath) {
       response.status(404);
       return new StreamableFile(Buffer.alloc(0));

@@ -24,6 +24,12 @@ import { codePointLength } from '../../../common/utils/text.util.js';
 import { CategoriesService } from '../../dictionaries/services/categories.service.js';
 import { PayMethodsService } from '../../dictionaries/services/pay-methods.service.js';
 import { BooksService } from '../../books/services/books.service.js';
+import {
+  RedisCacheService,
+  STAT_MONTH_SLOTS,
+  STAT_YEAR_SLOTS,
+} from '../../../common/redis/redis-cache.service.js';
+import { REDIS_KEYS } from '../../../common/redis/redis.constants.js';
 import { SignedUrlService } from '../../files/services/signed-url.service.js';
 import { StorageService } from '../../files/services/storage.service.js';
 import { CleanupService } from '../../files/services/cleanup.service.js';
@@ -38,7 +44,10 @@ import type {
   SummaryQueryDto,
   UpdateBillDto,
 } from '../dto/bill-list-query.dto.js';
-import { IdempotencyService } from './idempotency.service.js';
+import {
+  IdempotencyService,
+  computeIdempotencyFingerprint,
+} from './idempotency.service.js';
 
 const GROUPED_LIMIT = 1000;
 const PHOTO_KEY_PATTERN =
@@ -121,6 +130,7 @@ export class BillsService {
     private readonly storageService: StorageService,
     private readonly cleanupService: CleanupService,
     private readonly idempotencyService: IdempotencyService,
+    private readonly redisCache: RedisCacheService,
   ) {}
 
   // ---------- 查询 ----------
@@ -131,7 +141,7 @@ export class BillsService {
   ): Promise<{ list: BillVm[]; pagination: PaginationMeta }> {
     // bookId 归属校验：他人/不存在的账本统一 40401，禁止借空列表探测（04b §1 / 07 §8.3）
     if (query.bookId)
-      await this.booksService.getOwnedBookOrFail(userId, query.bookId);
+      await this.booksService.assertOwnedBook(userId, query.bookId);
     const { whereSql, params } = this.buildListScope(userId, query);
     const page = query.page;
     const pageSize = query.pageSize;
@@ -169,7 +179,7 @@ export class BillsService {
     list: BillVm[];
   }> {
     if (query.bookId)
-      await this.booksService.getOwnedBookOrFail(userId, query.bookId);
+      await this.booksService.assertOwnedBook(userId, query.bookId);
     const date = todayStr();
     const { whereSql, params } = this.buildScope({
       userId,
@@ -225,7 +235,7 @@ export class BillsService {
     }>;
   }> {
     if (query.bookId)
-      await this.booksService.getOwnedBookOrFail(userId, query.bookId);
+      await this.booksService.assertOwnedBook(userId, query.bookId);
     const [start, end] = monthRange(query.month);
     const { whereSql, params } = this.buildScope({
       userId,
@@ -302,7 +312,7 @@ export class BillsService {
     count: number;
   }> {
     if (query.bookId)
-      await this.booksService.getOwnedBookOrFail(userId, query.bookId);
+      await this.booksService.assertOwnedBook(userId, query.bookId);
     const [start, end] = monthRange(query.month);
     const { whereSql, params } = this.buildScope({
       userId,
@@ -351,9 +361,12 @@ export class BillsService {
     dto: CreateBillDto,
     idempotencyKey?: string,
   ): Promise<BillDetailVm> {
+    // 幂等指纹绑定请求体：同 key 携带不同请求体的重试直接 409，不会静默重放旧账单
+    const fingerprint = computeIdempotencyFingerprint(dto);
     const replayed = await this.idempotencyService.beginOrReplay(
       userId,
       idempotencyKey,
+      fingerprint,
     );
     if (replayed) {
       // 实时查库重放：图片签名 URL 重新签发，且仍受用户隔离约束
@@ -386,9 +399,21 @@ export class BillsService {
         return newId;
       });
 
-      const result = await this.buildDetail(userId, billId);
-      await this.idempotencyService.commit(userId, idempotencyKey, billId);
-      return result;
+      // 事务已提交：先落 committed=true 再组装详情；
+      // 组装瞬时报错时幂等 key 已标记提交，重试按已提交重放而非再插一笔
+      await this.idempotencyService.markCommitted(
+        userId,
+        idempotencyKey,
+        fingerprint,
+        billId,
+      );
+      // 收尾失效：新建账单影响所属月/年的统计缓存（all 与该账本两个维度）
+      await this.invalidateStatisticsCache(
+        userId,
+        normalized.recordDate,
+        normalized.bookId,
+      );
+      return this.buildDetail(userId, billId);
     } catch (error) {
       await this.idempotencyService.fail(userId, idempotencyKey);
       throw error;
@@ -453,6 +478,26 @@ export class BillsService {
       }
     });
 
+    // 收尾失效：金额/类型等统计相关字段变化影响所属月/年的聚合缓存；
+    // 日期或账本变更时旧维度 key 也须失效，否则旧月份/年份残留脏数据。
+    // 旧行（existing）在 UPDATE 前已读取，可低成本精确失效，无需 SCAN。
+    const monthChanged =
+      String(existing.record_date).slice(0, 7) !==
+      normalized.recordDate.slice(0, 7);
+    const bookChanged = String(existing.book_id) !== normalized.bookId;
+    await this.invalidateStatisticsCache(
+      userId,
+      normalized.recordDate,
+      normalized.bookId,
+    );
+    if (monthChanged || bookChanged) {
+      await this.invalidateStatisticsCache(
+        userId,
+        String(existing.record_date),
+        String(existing.book_id),
+      );
+    }
+
     // 提交后再 JOIN 组装 VO
     return this.buildDetail(userId, billId);
   }
@@ -466,9 +511,13 @@ export class BillsService {
     if (!Number.isFinite(client)) {
       bizError(ERROR_CODES.PARAM_INVALID, 'updatedAt 时间戳格式不正确');
     }
+    // 归一化到同一口径后严格相等：mysql2 将 DATETIME 反序列化为 Date
+    // （连接时区 +08:00），客户端回传的是 VO 下发的 formatTimestamp 同源串
+    //（含毫秒与 +08:00 偏移），两侧取毫秒时间戳比较；
+    // 原先 1 秒容差会放行紧邻的并发 PATCH，后写覆盖先写
     const server = new Date(serverStamp ?? '').getTime();
-    if (Math.abs(client - server) > 1000) {
-      bizError(ERROR_CODES.CONFLICT, '账单已被他人修改，请刷新后重试');
+    if (!Number.isFinite(server) || client !== server) {
+      bizError(ERROR_CODES.CONFLICT, '数据已被修改，请刷新后重试');
     }
   }
 
@@ -499,6 +548,9 @@ export class BillsService {
     });
 
     await this.cleanupService.markBillPhotosTombstone(photoKeys);
+    // 收尾失效：单条删除在收尾处已无法回溯 record_date，
+    // 直接 SCAN 失效该用户全部统计缓存（低频操作，正确性优先）
+    await this.invalidateStatisticsCache(userId);
     return { id: billId, deleted: true };
   }
 
@@ -541,10 +593,41 @@ export class BillsService {
     );
 
     await this.cleanupService.markBillPhotosTombstone(photoKeys);
+    // 收尾失效：整体清空跨所有月份/账本维度，SCAN 失效该用户全部统计缓存
+    await this.invalidateStatisticsCache(userId);
     return { deletedCount };
   }
 
   // ---------- 内部工具 ----------
+
+  /**
+   * 统计缓存失效：带 recordDate 时精确删除该月/年相关 key
+   * （all 与该账本两个维度；月档三件套 + 年档含 trend），
+   * 否则 SCAN 清空该用户全部统计缓存（remove/clear 收尾无法回溯日期）。
+   */
+  private async invalidateStatisticsCache(
+    userId: string,
+    recordDate?: string,
+    bookId?: string,
+  ): Promise<void> {
+    if (!recordDate) {
+      await this.redisCache.invalidateByPattern(
+        REDIS_KEYS.statPatternUser(userId),
+      );
+      return;
+    }
+    const scopes = bookId ? ['all', bookId] : ['all'];
+    const keys: string[] = [];
+    for (const scope of scopes) {
+      for (const slot of STAT_MONTH_SLOTS) {
+        keys.push(REDIS_KEYS.stat(slot, userId, scope, recordDate.slice(0, 7)));
+      }
+      for (const slot of STAT_YEAR_SLOTS) {
+        keys.push(REDIS_KEYS.stat(slot, userId, scope, recordDate.slice(0, 4)));
+      }
+    }
+    await this.redisCache.invalidateKeys(...keys);
+  }
 
   private buildListScope(
     userId: string,
@@ -701,7 +784,7 @@ export class BillsService {
     await this.payMethodsService.getPayMethodOrFail(dto.payMethodId);
     const bookId = await this.resolveBookId(userId, dto.bookId);
     const { amount, recordDate, recordTime, remark, photos } =
-      this.validateCommonFields(userId, {
+      await this.validateCommonFields(userId, {
         amount: dto.amount,
         date: dto.date,
         time: dto.time,
@@ -736,7 +819,7 @@ export class BillsService {
       dto.bookId ?? String(existing.book_id),
     );
 
-    const cleaned = this.validateCommonFields(userId, {
+    const cleaned = await this.validateCommonFields(userId, {
       amount: dto.amount ?? existing.amount,
       date: dto.date ?? existing.record_date,
       time: dto.time ?? existing.record_time.slice(0, 5),
@@ -758,7 +841,7 @@ export class BillsService {
     };
   }
 
-  private validateCommonFields(
+  private async validateCommonFields(
     userId: string,
     fields: {
       amount: number | string;
@@ -768,13 +851,13 @@ export class BillsService {
       photos?: string[];
       partial?: boolean;
     },
-  ): {
+  ): Promise<{
     amount: string;
     recordDate: string;
     recordTime: string;
     remark: string;
     photos: string[];
-  } {
+  }> {
     // 金额：> 0、≤ 上限、最多两位小数
     const rawAmount = fields.amount;
     if (typeof rawAmount === 'string' && /\.\d{3,}/.test(rawAmount.trim())) {
@@ -832,7 +915,7 @@ export class BillsService {
           typeof key !== 'string' ||
           !PHOTO_KEY_PATTERN.test(key) ||
           !key.startsWith(`bills/${userId}/`) ||
-          this.storageService.resolveExistingFile(key) === null
+          (await this.storageService.resolveExistingFile(key)) === null
         ) {
           bizError(ERROR_CODES.PARAM_INVALID, '凭证图片 key 非法');
         }
@@ -854,13 +937,13 @@ export class BillsService {
     bookId: string | undefined,
   ): Promise<string> {
     if (bookId) {
-      await this.booksService.getOwnedBookOrFail(userId, bookId);
+      await this.booksService.assertOwnedBook(userId, bookId);
       return bookId;
     }
     const activeBookId = await this.booksService.getActiveBookId(userId);
     if (activeBookId) {
       try {
-        await this.booksService.getOwnedBookOrFail(userId, activeBookId);
+        await this.booksService.assertOwnedBook(userId, activeBookId);
         return activeBookId;
       } catch {
         // 激活态异常时回退默认账本

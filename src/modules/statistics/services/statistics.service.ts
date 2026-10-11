@@ -16,6 +16,8 @@ import {
   yearRange,
 } from '../../../common/utils/date.util.js';
 import type { BillType } from '../../../entities/category.entity.js';
+import { REDIS_KEYS } from '../../../common/redis/redis.constants.js';
+import { RedisCacheService } from '../../../common/redis/redis-cache.service.js';
 import { BooksService } from '../../books/services/books.service.js';
 import type {
   CategoryStatsQueryDto,
@@ -60,12 +62,21 @@ export interface MomVo {
   text: string;
 }
 
-/** 统计与首页概览（04d）：实时 SQL 聚合，不建汇总表。 */
+/** 统计聚合缓存 TTL：仅已结束期间（上月/往年），45 分钟。 */
+const STAT_CACHE_TTL_SECONDS = 45 * 60;
+/** 统计用全量字典（含停用项）TTL：10 分钟。 */
+const DICT_ALL_TTL_SECONDS = 10 * 60;
+
+/**
+ * 统计与首页概览（04d）：实时 SQL 聚合，不建汇总表；
+ * 已结束期间（上月/往年）的聚合结果走 Redis 短缓存，当前月/当前年保持实时。
+ */
 @Injectable()
 export class StatisticsService {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly booksService: BooksService,
+    private readonly redisCache: RedisCacheService,
   ) {}
 
   async overview(
@@ -88,48 +99,74 @@ export class StatisticsService {
   }> {
     const period = this.resolvePeriod(query);
     const type: BillType = query.type ?? 'expense';
-    const scope = await this.buildScope(userId, period, query.bookId);
-    const prevPeriod: Period = period.year
-      ? { year: shiftYear(period.year, -1) }
-      : { month: shiftMonth(period.month!, -1) };
-    const prevScope = await this.buildScope(userId, prevPeriod, query.bookId);
-
-    const [current, previous] = await Promise.all([
-      this.sumMonth(scope),
-      this.sumMonth(prevScope),
-    ]);
-
-    const total = round2(current[type]);
-    const oppositeType: BillType = type === 'expense' ? 'income' : 'expense';
-    const oppositeTotal = round2(current[oppositeType]);
-    const balance = round2(current.income - current.expense);
-    const count =
-      type === 'expense' ? current.expenseCount : current.incomeCount;
-    // 月维度：日均按已过天数；年维度：日均按年内已过天数，另附月均
-    const days = period.year
-      ? elapsedDaysOfYear(period.year)
-      : elapsedDays(period.month!);
-    const months = period.year ? elapsedMonths(period.year) : 0;
-    const prevTotal = round2(previous[type]);
-
-    return {
-      granularity: period.year ? 'year' : 'month',
-      ...(period.year ? { year: period.year } : { month: period.month }),
+    // 已结束期间（上月/往年）结果走缓存，当前月/当前年实时计算
+    return this.withStatCache(
+      'overview',
+      userId,
+      query.bookId,
+      period,
       type,
-      total,
-      oppositeTotal,
-      balance,
-      count,
-      dailyAverage: days > 0 ? round2(total / days) : 0,
-      elapsedDays: days,
-      ...(period.year
-        ? {
-            monthlyAverage: months > 0 ? round2(total / months) : 0,
-            elapsedMonths: months,
-          }
-        : {}),
-      mom: this.buildMom(total, prevTotal),
-    };
+      async () => {
+        // 归属校验合并为一次（原先 current/prev 两次 buildScope 各校验一遍）
+        if (query.bookId)
+          await this.booksService.assertOwnedBook(userId, query.bookId);
+        const prevPeriod: Period = period.year
+          ? { year: shiftYear(period.year, -1) }
+          : { month: shiftMonth(period.month!, -1) };
+        const scope = await this.buildScope(
+          userId,
+          period,
+          query.bookId,
+          undefined,
+          false,
+        );
+        const prevScope = await this.buildScope(
+          userId,
+          prevPeriod,
+          query.bookId,
+          undefined,
+          false,
+        );
+
+        const [current, previous] = await Promise.all([
+          this.sumMonth(scope),
+          this.sumMonth(prevScope),
+        ]);
+
+        const total = round2(current[type]);
+        const oppositeType: BillType =
+          type === 'expense' ? 'income' : 'expense';
+        const oppositeTotal = round2(current[oppositeType]);
+        const balance = round2(current.income - current.expense);
+        const count =
+          type === 'expense' ? current.expenseCount : current.incomeCount;
+        // 月维度：日均按已过天数；年维度：日均按年内已过天数，另附月均
+        const days = period.year
+          ? elapsedDaysOfYear(period.year)
+          : elapsedDays(period.month!);
+        const months = period.year ? elapsedMonths(period.year) : 0;
+        const prevTotal = round2(previous[type]);
+
+        return {
+          granularity: period.year ? 'year' : 'month',
+          ...(period.year ? { year: period.year } : { month: period.month }),
+          type,
+          total,
+          oppositeTotal,
+          balance,
+          count,
+          dailyAverage: days > 0 ? round2(total / days) : 0,
+          elapsedDays: days,
+          ...(period.year
+            ? {
+                monthlyAverage: months > 0 ? round2(total / months) : 0,
+                elapsedMonths: months,
+              }
+            : {}),
+          mom: this.buildMom(total, prevTotal),
+        };
+      },
+    );
   }
 
   async categories(
@@ -154,46 +191,55 @@ export class StatisticsService {
   }> {
     const period = this.resolvePeriod(query);
     const type: BillType = query.type ?? 'expense';
-    const scope = await this.buildScope(userId, period, query.bookId, type);
+    return this.withStatCache(
+      'categories',
+      userId,
+      query.bookId,
+      period,
+      type,
+      async () => {
+        const scope = await this.buildScope(userId, period, query.bookId, type);
 
-    const [dictMap, rows] = await Promise.all([
-      // 历史口径：字典停用后仍需返回原名/图标（04c：JOIN 不过滤状态）
-      this.loadCategoryDict(type),
-      this.dataSource.query<GroupAmountRow[]>(
-        `SELECT b.category_id AS group_id, COALESCE(SUM(b.amount), 0) AS total, COUNT(*) AS cnt
+        const [dictMap, rows] = await Promise.all([
+          // 历史口径：字典停用后仍需返回原名/图标（04c：JOIN 不过滤状态）
+          this.loadCategoryDict(type),
+          this.dataSource.query<GroupAmountRow[]>(
+            `SELECT b.category_id AS group_id, COALESCE(SUM(b.amount), 0) AS total, COUNT(*) AS cnt
            FROM bills b WHERE ${scope.sql}
           GROUP BY b.category_id`,
-        scope.params,
-      ),
-    ]);
+            scope.params,
+          ),
+        ]);
 
-    const list = rows
-      .map((row) => {
-        const meta = dictMap.get(String(row.group_id));
-        const amount = round2(row.total);
+        const list = rows
+          .map((row) => {
+            const meta = dictMap.get(String(row.group_id));
+            const amount = round2(row.total);
+            return {
+              categoryId: String(row.group_id),
+              name: meta?.name ?? '已删除分类',
+              icon: meta?.icon ?? '📦',
+              color: meta?.color ?? '#999999',
+              bg: meta?.bg ?? '#f2f2f2',
+              amount,
+              count: Number(row.cnt),
+            };
+          })
+          .sort((a, b) => b.amount - a.amount);
+        const total = round2(list.reduce((sum, item) => sum + item.amount, 0));
+
         return {
-          categoryId: String(row.group_id),
-          name: meta?.name ?? '已删除分类',
-          icon: meta?.icon ?? '📦',
-          color: meta?.color ?? '#999999',
-          bg: meta?.bg ?? '#f2f2f2',
-          amount,
-          count: Number(row.cnt),
+          granularity: period.year ? 'year' : 'month',
+          ...(period.year ? { year: period.year } : { month: period.month }),
+          type,
+          total,
+          list: list.map((item) => ({
+            ...item,
+            percent: total > 0 ? round2((item.amount / total) * 100) : 0,
+          })),
         };
-      })
-      .sort((a, b) => b.amount - a.amount);
-    const total = round2(list.reduce((sum, item) => sum + item.amount, 0));
-
-    return {
-      granularity: period.year ? 'year' : 'month',
-      ...(period.year ? { year: period.year } : { month: period.month }),
-      type,
-      total,
-      list: list.map((item) => ({
-        ...item,
-        percent: total > 0 ? round2((item.amount / total) * 100) : 0,
-      })),
-    };
+      },
+    );
   }
 
   async payMethods(
@@ -216,51 +262,60 @@ export class StatisticsService {
     }>;
   }> {
     const period = this.resolvePeriod(query);
-    // 固定支出口径（04d §3）
-    const scope = await this.buildScope(
+    // 固定支出口径（04d §3），结果无 type 维度
+    return this.withStatCache(
+      'payMethods',
       userId,
-      period,
       query.bookId,
-      'expense',
-    );
+      period,
+      undefined,
+      async () => {
+        const scope = await this.buildScope(
+          userId,
+          period,
+          query.bookId,
+          'expense',
+        );
 
-    const [dictMap, rows] = await Promise.all([
-      // 历史口径：含停用支付方式（04c：JOIN 不过滤状态）
-      this.loadPayMethodDict(),
-      this.dataSource.query<GroupAmountRow[]>(
-        `SELECT b.pay_method_id AS group_id, COALESCE(SUM(b.amount), 0) AS total, COUNT(*) AS cnt
+        const [dictMap, rows] = await Promise.all([
+          // 历史口径：含停用支付方式（04c：JOIN 不过滤状态）
+          this.loadPayMethodDict(),
+          this.dataSource.query<GroupAmountRow[]>(
+            `SELECT b.pay_method_id AS group_id, COALESCE(SUM(b.amount), 0) AS total, COUNT(*) AS cnt
            FROM bills b WHERE ${scope.sql}
           GROUP BY b.pay_method_id`,
-        scope.params,
-      ),
-    ]);
+            scope.params,
+          ),
+        ]);
 
-    const list = rows
-      .map((row) => {
-        const meta = dictMap.get(String(row.group_id));
-        const amount = round2(row.total);
+        const list = rows
+          .map((row) => {
+            const meta = dictMap.get(String(row.group_id));
+            const amount = round2(row.total);
+            return {
+              payMethodId: String(row.group_id),
+              name: meta?.name ?? '已删除方式',
+              shortName: meta?.shortName ?? '?',
+              color: meta?.color ?? '#999999',
+              bg: meta?.bg ?? '#f2f2f2',
+              amount,
+              count: Number(row.cnt),
+            };
+          })
+          .sort((a, b) => b.amount - a.amount);
+        const total = round2(list.reduce((sum, item) => sum + item.amount, 0));
+
         return {
-          payMethodId: String(row.group_id),
-          name: meta?.name ?? '已删除方式',
-          shortName: meta?.shortName ?? '?',
-          color: meta?.color ?? '#999999',
-          bg: meta?.bg ?? '#f2f2f2',
-          amount,
-          count: Number(row.cnt),
+          granularity: period.year ? 'year' : 'month',
+          ...(period.year ? { year: period.year } : { month: period.month }),
+          total,
+          list: list.map((item) => ({
+            ...item,
+            percent: total > 0 ? round2((item.amount / total) * 100) : 0,
+          })),
         };
-      })
-      .sort((a, b) => b.amount - a.amount);
-    const total = round2(list.reduce((sum, item) => sum + item.amount, 0));
-
-    return {
-      granularity: period.year ? 'year' : 'month',
-      ...(period.year ? { year: period.year } : { month: period.month }),
-      total,
-      list: list.map((item) => ({
-        ...item,
-        percent: total > 0 ? round2((item.amount / total) * 100) : 0,
-      })),
-    };
+      },
+    );
   }
 
   async trend(
@@ -277,44 +332,56 @@ export class StatisticsService {
       income: number;
     }>;
   }> {
-    if (query.bookId)
-      await this.booksService.getOwnedBookOrFail(userId, query.bookId);
+    // 月维度序列含当前月，保持实时；年维度（往年）按年缓存
+    return this.withStatCache(
+      'trend',
+      userId,
+      query.bookId,
+      query.year ? { year: query.year } : { month: currentMonth() },
+      undefined,
+      async () => {
+        if (query.bookId)
+          await this.booksService.assertOwnedBook(userId, query.bookId);
 
-    // 月维度：包含当前月向前推 N 个月；年维度：该年 1~12 月固定 12 档
-    const sequence = query.year
-      ? monthsOfYear(query.year)
-      : recentMonths(query.months ?? 6);
-    const [start] = monthRange(sequence[0]);
-    const [, end] = monthRange(sequence[sequence.length - 1]);
+        // 月维度：包含当前月向前推 N 个月；年维度：该年 1~12 月固定 12 档
+        const sequence = query.year
+          ? monthsOfYear(query.year)
+          : recentMonths(query.months ?? 6);
+        const [start] = monthRange(sequence[0]);
+        const [, end] = monthRange(sequence[sequence.length - 1]);
 
-    // 仅此处允许 DATE_FORMAT，用于 GROUP BY（04d §4 明确）；WHERE 仍走半开区间
-    const rows = await this.dataSource.query<TrendRow[]>(
-      `SELECT DATE_FORMAT(b.record_date, '%Y-%m') AS ym,
+        // 仅此处允许 DATE_FORMAT，用于 GROUP BY（04d §4 明确）；WHERE 仍走半开区间
+        const rows = await this.dataSource.query<TrendRow[]>(
+          `SELECT DATE_FORMAT(b.record_date, '%Y-%m') AS ym,
               COALESCE(SUM(CASE WHEN b.type = 'expense' THEN b.amount ELSE 0 END), 0) AS expense,
               COALESCE(SUM(CASE WHEN b.type = 'income' THEN b.amount ELSE 0 END), 0) AS income
          FROM bills b
         WHERE b.user_id = ? AND b.record_date >= ? AND b.record_date < ?
               ${query.bookId ? 'AND b.book_id = ?' : ''}
         GROUP BY ym`,
-      query.bookId ? [userId, start, end, query.bookId] : [userId, start, end],
-    );
-    const amountMap = new Map(
-      rows.map((row) => [
-        row.ym,
-        { expense: round2(row.expense), income: round2(row.income) },
-      ]),
-    );
+          query.bookId
+            ? [userId, start, end, query.bookId]
+            : [userId, start, end],
+        );
+        const amountMap = new Map(
+          rows.map((row) => [
+            row.ym,
+            { expense: round2(row.expense), income: round2(row.income) },
+          ]),
+        );
 
-    const list = sequence.map((month) => ({
-      month,
-      label: monthLabel(month),
-      expense: amountMap.get(month)?.expense ?? 0,
-      income: amountMap.get(month)?.income ?? 0,
-    }));
+        const list = sequence.map((month) => ({
+          month,
+          label: monthLabel(month),
+          expense: amountMap.get(month)?.expense ?? 0,
+          income: amountMap.get(month)?.income ?? 0,
+        }));
 
-    return query.year
-      ? { granularity: 'year', year: query.year, list }
-      : { granularity: 'month', months: query.months ?? 6, list };
+        return query.year
+          ? { granularity: 'year' as const, year: query.year, list }
+          : { granularity: 'month' as const, months: query.months ?? 6, list };
+      },
+    );
   }
 
   /**
@@ -327,7 +394,10 @@ export class StatisticsService {
     return { month: query.month ?? currentMonth() };
   }
 
-  /** 全量分类字典（含停用项，历史统计可追溯）。 */
+  /**
+   * 全量分类字典（含停用项，历史统计可追溯）。
+   * 独立短 TTL 缓存；Redis 读失败/未命中时降级回源 DB，不阻断请求。
+   */
   private async loadCategoryDict(
     type: BillType,
   ): Promise<
@@ -336,6 +406,23 @@ export class StatisticsService {
       { id: string; name: string; icon: string; color: string; bg: string }
     >
   > {
+    const cacheKey = REDIS_KEYS.dictCategoriesAll(type);
+    const cached = await this.redisCache.get<
+      Array<
+        [
+          string,
+          {
+            id: string;
+            name: string;
+            icon: string;
+            color: string;
+            bg: string;
+          },
+        ]
+      >
+    >(cacheKey);
+    if (cached) return new Map(cached);
+
     const rows = await this.dataSource.query<
       Array<{
         id: string | number;
@@ -347,18 +434,40 @@ export class StatisticsService {
     >('SELECT id, name, icon, color, bg FROM categories WHERE type = ?', [
       type,
     ]);
-    return new Map(
+    const map = new Map(
       rows.map((row) => [String(row.id), { ...row, id: String(row.id) }]),
     );
+    await this.redisCache.set(cacheKey, [...map], DICT_ALL_TTL_SECONDS);
+    return map;
   }
 
-  /** 全量支付方式字典（含停用项）。 */
+  /**
+   * 全量支付方式字典（含停用项）。
+   * 独立短 TTL 缓存；Redis 读失败/未命中时降级回源 DB，不阻断请求。
+   */
   private async loadPayMethodDict(): Promise<
     Map<
       string,
       { id: string; name: string; shortName: string; color: string; bg: string }
     >
   > {
+    const cacheKey = REDIS_KEYS.dictPayMethodsAll;
+    const cached = await this.redisCache.get<
+      Array<
+        [
+          string,
+          {
+            id: string;
+            name: string;
+            shortName: string;
+            color: string;
+            bg: string;
+          },
+        ]
+      >
+    >(cacheKey);
+    if (cached) return new Map(cached);
+
     const rows = await this.dataSource.query<
       Array<{
         id: string | number;
@@ -368,7 +477,7 @@ export class StatisticsService {
         bg: string;
       }>
     >('SELECT id, name, short_name, color, bg FROM pay_methods');
-    return new Map(
+    const map = new Map(
       rows.map((row) => [
         String(row.id),
         {
@@ -380,6 +489,41 @@ export class StatisticsService {
         },
       ]),
     );
+    await this.redisCache.set(cacheKey, [...map], DICT_ALL_TTL_SECONDS);
+    return map;
+  }
+
+  /**
+   * 统计聚合缓存包装：已结束期间（上月/往年）按 slot 缓存命中即返回，
+   * 未命中计算后回填；当前月/当前年一律实时计算。
+   */
+  private async withStatCache<T>(
+    slot: string,
+    userId: string,
+    bookId: string | undefined,
+    period: Period,
+    variant: string | undefined,
+    compute: () => Promise<T>,
+  ): Promise<T> {
+    const nowMonth = currentMonth();
+    const closed =
+      period.month !== undefined
+        ? period.month < nowMonth
+        : (period.year ?? '') < nowMonth.slice(0, 4);
+    if (!closed) return compute();
+
+    const cacheKey = REDIS_KEYS.stat(
+      slot,
+      userId,
+      bookId ?? 'all',
+      period.month ?? period.year!,
+      variant,
+    );
+    const cached = await this.redisCache.get<T>(cacheKey);
+    if (cached !== null) return cached;
+    const result = await compute();
+    await this.redisCache.set(cacheKey, result, STAT_CACHE_TTL_SECONDS);
+    return result;
   }
 
   /**
@@ -405,8 +549,11 @@ export class StatisticsService {
     period: Period,
     bookId?: string,
     type?: BillType,
+    checkOwnership = true,
   ): Promise<Scope> {
-    if (bookId) await this.booksService.getOwnedBookOrFail(userId, bookId);
+    // overview 已在外层合并校验一次，此处跳过避免重复
+    if (bookId && checkOwnership)
+      await this.booksService.assertOwnedBook(userId, bookId);
     // 年维度用全年半开区间，月维度用单月半开区间（禁止 DATE_FORMAT 进 WHERE）
     const [start, end] = period.year
       ? yearRange(period.year)
