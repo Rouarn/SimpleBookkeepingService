@@ -2,18 +2,37 @@ import mysql from 'mysql2/promise';
 import { readdir, copyFile, mkdir } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { config as dotenvConfig } from 'dotenv';
 
-// ===== 配置 =====
+// 读 .env.development（或 DOTENV_PATH 指定的文件），禁止在脚本内硬编码口令/手机号
+dotenvConfig({ path: process.env.DOTENV_PATH ?? '.env.development' });
+
+// ===== 配置（全部来自环境变量，缺参直接报错退出）=====
+function requiredEnv(name) {
+  const value = process.env[name];
+  if (!value) {
+    console.error(
+      `[seed] 缺少必需的环境变量 ${name}（配置于 .env.development/.env.production，或用 DOTENV_PATH 指定）`,
+    );
+    process.exit(1);
+  }
+  return value;
+}
+
 const DB_CONFIG = {
-  host: '127.0.0.1',
-  port: 3306,
-  user: 'root',
-  password: '2001',
-  database: 'dbtest',
+  host: process.env.DB_HOST ?? '127.0.0.1',
+  port: Number(process.env.DB_PORT ?? 3306),
+  user: requiredEnv('DB_USER'),
+  password: requiredEnv('DB_PASSWORD'),
+  database: requiredEnv('DB_NAME'),
 };
 
-const PHONE = '15638309893';
-const IMAGE_DIR = '/Users/woyuxiaji/Pictures/storage/fulitu-cc';
+// 目标用户手机号：默认随机生成（避免真实号码进入仓库），也可用 SEED_PHONE 指定
+const PHONE =
+  process.env.SEED_PHONE ??
+  `1${randomInt(3, 9)}${String(Date.now()).slice(-9)}`;
+// 凭证图片素材目录：可选；未配置时跳过图片生成，只造账单数据
+const IMAGE_DIR = process.env.SEED_IMAGE_DIR ?? null;
 const UPLOAD_DIR = resolve('./uploads');
 
 // 分类（来自种子数据）
@@ -41,7 +60,9 @@ function pick(arr) {
 }
 
 function randomDate(start, end) {
-  return new Date(start.getTime() + Math.random() * (end.getTime() - start.getTime()));
+  return new Date(
+    start.getTime() + Math.random() * (end.getTime() - start.getTime()),
+  );
 }
 
 function buildKey(userId, date) {
@@ -70,25 +91,72 @@ function randomAmount(type) {
 
 // 备注池
 const EXPENSE_REMARKS = [
-  '', '', '', '', // 大部分无备注
-  '午餐', '晚餐', '早餐', '地铁', '打车', '超市', '网购',
-  '加油', '停车费', '电影', '咖啡', '奶茶', '水果', '蔬菜',
-  '日用品', '话费', '电费', '水费', '燃气费', '房租',
-  '看病', '买药', '买书', '培训', '机票', '酒店', '门票',
-  '礼物', '红包', '聚餐', '理发', '健身', '快递',
+  '',
+  '',
+  '',
+  '', // 大部分无备注
+  '午餐',
+  '晚餐',
+  '早餐',
+  '地铁',
+  '打车',
+  '超市',
+  '网购',
+  '加油',
+  '停车费',
+  '电影',
+  '咖啡',
+  '奶茶',
+  '水果',
+  '蔬菜',
+  '日用品',
+  '话费',
+  '电费',
+  '水费',
+  '燃气费',
+  '房租',
+  '看病',
+  '买药',
+  '买书',
+  '培训',
+  '机票',
+  '酒店',
+  '门票',
+  '礼物',
+  '红包',
+  '聚餐',
+  '理发',
+  '健身',
+  '快递',
 ];
 const INCOME_REMARKS = [
-  '', '', '',
-  '工资', '奖金', '理财收益', '退款', '红包', '兼职', '礼金', '佣金',
+  '',
+  '',
+  '',
+  '工资',
+  '奖金',
+  '理财收益',
+  '退款',
+  '红包',
+  '兼职',
+  '礼金',
+  '佣金',
 ];
 
 async function main() {
   const conn = await mysql.createConnection(DB_CONFIG);
 
   // 获取用户和默认账本
-  const [users] = await conn.query('SELECT id FROM users WHERE phone = ?', [PHONE]);
+  const [users] = await conn.query('SELECT id FROM users WHERE phone = ?', [
+    PHONE,
+  ]);
   if (users.length === 0) {
     console.error(`用户 ${PHONE} 不存在`);
+    if (!process.env.SEED_PHONE) {
+      console.error(
+        '提示：脚本默认使用随机手机号（避免真实号码入库仓库），请用 SEED_PHONE=手机号 指定已注册的测试用户',
+      );
+    }
     await conn.end();
     process.exit(1);
   }
@@ -107,10 +175,15 @@ async function main() {
 
   console.log(`用户ID: ${userId}, 账本ID: ${bookId}`);
 
-  // 读取图片列表
-  const allFiles = await readdir(IMAGE_DIR);
-  const images = allFiles.filter((f) => /\.(jpe?g|png)$/i.test(f));
-  console.log(`可用图片数量: ${images.length}`);
+  // 读取图片列表（未配置 SEED_IMAGE_DIR 时跳过图片生成）
+  let images = [];
+  if (IMAGE_DIR) {
+    const allFiles = await readdir(IMAGE_DIR);
+    images = allFiles.filter((f) => /\.(jpe?g|png)$/i.test(f));
+  }
+  console.log(
+    `可用图片数量: ${images.length}${IMAGE_DIR ? '' : '（未配置 SEED_IMAGE_DIR，跳过凭证图片）'}`,
+  );
 
   // 生成账单数据
   console.log(`开始生成 ${TOTAL_BILLS} 条账单记录...`);
@@ -139,13 +212,23 @@ async function main() {
 
         const [result] = await conn.query(
           'INSERT INTO bills (user_id, book_id, category_id, pay_method_id, type, amount, record_date, record_time, remark) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          [userId, bookId, categoryId, payMethodId, type, amount, recordDate, recordTime, remark],
+          [
+            userId,
+            bookId,
+            categoryId,
+            payMethodId,
+            type,
+            amount,
+            recordDate,
+            recordTime,
+            remark,
+          ],
         );
         const billId = String(result.insertId);
         insertedBills++;
 
-        // 添加图片
-        if (Math.random() < PHOTO_RATIO) {
+        // 添加图片（有素材才生成）
+        if (images.length > 0 && Math.random() < PHOTO_RATIO) {
           const photoCount = randomInt(1, 3);
           const usedImages = new Set();
           for (let k = 0; k < photoCount; k++) {
@@ -169,7 +252,9 @@ async function main() {
         }
       }
       await conn.commit();
-      console.log(`已完成 ${batchEnd}/${TOTAL_BILLS} (账单: ${insertedBills}, 图片: ${insertedPhotos})`);
+      console.log(
+        `已完成 ${batchEnd}/${TOTAL_BILLS} (账单: ${insertedBills}, 图片: ${insertedPhotos})`,
+      );
     } catch (err) {
       await conn.rollback();
       console.error('批次插入失败:', err.message);
@@ -187,7 +272,7 @@ async function main() {
     [userId],
   );
   const [yearStats] = await conn.query(
-    "SELECT YEAR(record_date) AS year, type, COUNT(*) AS cnt FROM bills WHERE user_id = ? GROUP BY YEAR(record_date), type ORDER BY year, type",
+    'SELECT YEAR(record_date) AS year, type, COUNT(*) AS cnt FROM bills WHERE user_id = ? GROUP BY YEAR(record_date), type ORDER BY year, type',
     [userId],
   );
 

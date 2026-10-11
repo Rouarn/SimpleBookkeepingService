@@ -53,6 +53,22 @@ import { HealthModule } from './modules/health/health.module.js';
               remove: false,
             },
             customProps: () => ({ context: 'HTTP' }),
+            serializers: {
+              // 只落 method/path/远端地址：query（含签名图片的 sign/e 凭证）
+              // 与 header 一律不进日志，防止持日志者重放签名 URL（07 §8.2）
+              req: (req: {
+                method?: string;
+                url?: string;
+                socket?: { remoteAddress?: string };
+              }) => ({
+                method: req.method,
+                path:
+                  typeof req.url === 'string'
+                    ? req.url.split('?')[0]
+                    : undefined,
+                remoteAddress: req.socket?.remoteAddress,
+              }),
+            },
             autoLogging: {
               ignore: (req) => (req as { url?: string }).url === '/health',
             },

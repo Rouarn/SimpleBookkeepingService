@@ -28,11 +28,14 @@ export function isYearString(value: string): boolean {
   return /^\d{4}$/.test(value);
 }
 
+/** 严格日历日期（YYYY-MM-DD）：按 daysInMonth 校验，拦截 02-30/04-31 等 */
 export function isDateString(value: string): boolean {
-  return (
-    /^\d{4}-\d{2}-\d{2}$/.test(value) &&
-    !Number.isNaN(new Date(`${value}T00:00:00`).getTime())
-  );
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth(year, month);
 }
 
 export function isTimeString(value: string): boolean {

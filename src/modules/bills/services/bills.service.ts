@@ -11,6 +11,7 @@ import {
   currentMonth,
   dayLabel,
   dateLabel,
+  daysInMonth,
   monthRange,
   timeToColumn,
   todayStr,
@@ -475,11 +476,17 @@ export class BillsService {
     userId: string,
     billId: string,
   ): Promise<{ id: string; deleted: boolean }> {
-    // 事务④：先取凭证 key 供 7 天墓碑保留，再物理删除（照片外键级联）。
-    // Redis 墓碑登记放在事务提交之后（05 §3.3：事务内不做外部调用）。
+    // 事务④：先取凭证 key 供 7 天墓碑保留，再物理删除。
+    // 全部关联 createForeignKeyConstraints:false，库中并无真实外键，
+    // 照片行必须显式删除——否则残留孤儿行会让 cleanup 把对应文件
+    // 当作"仍被引用"，7 天墓碑机制失效、磁盘只增不减。
     const photoKeys = await this.dataSource.transaction(async (manager) => {
       const photoRows = await manager.query<PhotoRow[]>(
         'SELECT url FROM bill_photos WHERE bill_id = ? AND user_id = ?',
+        [billId, userId],
+      );
+      await manager.query(
+        'DELETE FROM bill_photos WHERE bill_id = ? AND user_id = ?',
         [billId, userId],
       );
       const result = await manager.query(
@@ -502,14 +509,21 @@ export class BillsService {
     if (dto.bookId)
       await this.booksService.getOwnedBookOrFail(userId, dto.bookId);
 
-    // Redis 墓碑登记放在事务提交之后（05 §3.3）
+    // Redis 墓碑登记放在事务提交之后（05 §3.3）。
+    // 同 remove：无外键约束，先删照片行再删账单（子查询引用 bills 表，MySQL 允许）。
     const { deletedCount, photoKeys } = await this.dataSource.transaction(
       async (manager) => {
+        const photoWhere =
+          'WHERE user_id = ?' +
+          (dto.bookId
+            ? ' AND bill_id IN (SELECT id FROM bills WHERE book_id = ?)'
+            : '');
         const photoRows = await manager.query<PhotoRow[]>(
-          'SELECT url FROM bill_photos WHERE user_id = ?' +
-            (dto.bookId
-              ? ' AND bill_id IN (SELECT id FROM bills WHERE book_id = ?)'
-              : ''),
+          `SELECT url FROM bill_photos ${photoWhere}`,
+          dto.bookId ? [userId, dto.bookId] : [userId],
+        );
+        await manager.query(
+          `DELETE FROM bill_photos ${photoWhere}`,
           dto.bookId ? [userId, dto.bookId] : [userId],
         );
         const result = await manager.query(
@@ -771,11 +785,17 @@ export class BillsService {
       bizError(ERROR_CODES.AMOUNT_INVALID);
     if (amountNumber > MAX_AMOUNT) bizError(ERROR_CODES.AMOUNT_INVALID);
 
-    // 日期：不可未来；date=当天缺省时间取当前时刻，历史日期缺省 12:00
+    // 日期：不可未来；date=当天缺省时间取当前时刻，历史日期缺省 12:00。
+    // 正则 + daysInMonth 真实日历校验：拦截 02-30/02-31/04-31 等非法日期，
+    // 否则 new Date 会自动进位放行，MySQL strict 写入抛 1292 变 500。
     const recordDate = fields.date ?? todayStr();
+    const dateMatch = /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.exec(
+      recordDate,
+    );
     if (
-      !/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(recordDate) ||
-      Number.isNaN(new Date(`${recordDate}T00:00:00`).getTime())
+      !dateMatch ||
+      Number(dateMatch[3]) >
+        daysInMonth(Number(dateMatch[1]), Number(dateMatch[2]))
     ) {
       bizError(ERROR_CODES.DATETIME_INVALID);
     }

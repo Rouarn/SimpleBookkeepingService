@@ -49,8 +49,14 @@ async function bootstrap(): Promise<void> {
   const configService = app.get(ConfigService);
   const appConfig = configService.get<AppConfig['app']>('app')!;
 
-  // 部署于 nginx 反向代理之后，取真实客户端 IP 用于限流/审计（06 §2）
-  app.getHttpAdapter().getInstance().set('trust proxy', 1);
+  // 部署于 nginx 反向代理之后，取真实客户端 IP 用于限流/审计（06 §2）。
+  // 跳数由 TRUST_PROXY_HOPS 环境变量控制（默认 1 跳 = 单层 nginx）：
+  // 服务端口若可能被直连，必须设 0 并由网关覆盖 X-Forwarded-For，
+  // 否则客户端伪造 XFF 可绕过全部基于 IP 的限流与审计。
+  app
+    .getHttpAdapter()
+    .getInstance()
+    .set('trust proxy', appConfig.trustProxyHops);
 
   // 安全响应头（07 §1.2）
   app.use(helmet());

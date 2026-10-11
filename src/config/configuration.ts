@@ -15,6 +15,8 @@ export interface AppConfig {
     isProduction: boolean;
     port: number;
     corsOrigins: string[];
+    /** Express trust proxy 跳数：nginx 反代填 1；直连填 0（防 XFF 伪造绕过限流） */
+    trustProxyHops: number;
   };
   database: {
     host: string;
@@ -79,6 +81,7 @@ export default (): AppConfig => {
       isProduction: nodeEnv === 'production',
       port: readInt(process.env, 'PORT', 3000, 1, 65535),
       corsOrigins: readList(process.env, 'CORS_ORIGINS', []),
+      trustProxyHops: readInt(process.env, 'TRUST_PROXY_HOPS', 1, 0, 10),
     },
     database: {
       host: readString(process.env, 'DB_HOST'),
