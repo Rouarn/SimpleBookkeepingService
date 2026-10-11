@@ -38,6 +38,12 @@ export const ERROR_CODES = {
     httpStatus: HttpStatus.BAD_REQUEST,
     message: '日期/时间格式非法',
   },
+  /** 上传场景非法（P2-08）：/uploads/image 仅允许 bill，头像唯一入口 POST /users/me/avatar */
+  UPLOAD_SCENE_INVALID: {
+    code: 40005,
+    httpStatus: HttpStatus.BAD_REQUEST,
+    message: '上传场景非法，scene 仅支持 bill',
+  },
 
   NAME_INVALID: {
     code: 40010,
@@ -96,6 +102,12 @@ export const ERROR_CODES = {
     code: 40300,
     httpStatus: HttpStatus.FORBIDDEN,
     message: '账号已冻结',
+  },
+  /** 通用禁止访问（P2-11）：区别于账号冻结 40300，其他 ForbiddenException 一律走此码 */
+  FORBIDDEN_OPERATION: {
+    code: 40301,
+    httpStatus: HttpStatus.FORBIDDEN,
+    message: '无操作权限',
   },
 
   BILL_NOT_FOUND: {

@@ -29,6 +29,12 @@ interface CountRow {
   cnt: string | number;
 }
 
+/** 我的统计：账单笔数与记账天数合并为一条聚合行 */
+interface BillStatsRow {
+  records: string | number;
+  days: string | number;
+}
+
 /** 与注册一致（auth.service BCRYPT_COST）：bcrypt 计算成本因子 */
 const BCRYPT_COST = 12;
 
@@ -162,23 +168,23 @@ export class UsersService {
     books: number;
     joinDays: number;
   }> {
-    const billRows = await this.dataSource.query<CountRow[]>(
-      'SELECT COUNT(*) AS cnt FROM bills WHERE user_id = ?',
-      [userId],
-    );
-    const dayRows = await this.dataSource.query<CountRow[]>(
-      'SELECT COUNT(DISTINCT record_date) AS cnt FROM bills WHERE user_id = ?',
-      [userId],
-    );
-    const bookRows = await this.dataSource.query<CountRow[]>(
-      'SELECT COUNT(*) AS cnt FROM books WHERE user_id = ? AND deleted_at IS NULL',
-      [userId],
-    );
-    const user = await this.getUserRowOrFail(userId);
+    // 三路查询互不依赖并行发出；账单两条聚合（笔数 + 去重记账天数）合并为一条 SELECT
+    const [billStatsRows, bookRows, user] = await Promise.all([
+      this.dataSource.query<BillStatsRow[]>(
+        'SELECT COUNT(*) AS records, COUNT(DISTINCT record_date) AS days FROM bills WHERE user_id = ?',
+        [userId],
+      ),
+      this.dataSource.query<CountRow[]>(
+        'SELECT COUNT(*) AS cnt FROM books WHERE user_id = ? AND deleted_at IS NULL',
+        [userId],
+      ),
+      this.getUserRowOrFail(userId),
+    ]);
+    const billStats = billStatsRows[0];
 
     return {
-      records: Number(billRows[0]?.cnt ?? 0),
-      days: Number(dayRows[0]?.cnt ?? 0),
+      records: Number(billStats?.records ?? 0),
+      days: Number(billStats?.days ?? 0),
       books: Number(bookRows[0]?.cnt ?? 0),
       joinDays: joinDaysOf(user.join_date),
     };

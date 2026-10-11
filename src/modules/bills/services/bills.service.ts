@@ -50,10 +50,32 @@ import {
 } from './idempotency.service.js';
 
 const GROUPED_LIMIT = 1000;
+/** 今日流水无分页入参，兜底行数上限：合计走独立聚合不受影响，仅限制明细返回条数 */
+const TODAY_LIMIT = 200;
+/** 大批量删除/迁移按 1000 行一批拆成小事务，避免长事务大锁与巨型 binlog 事务 */
+const BATCH_SIZE = 1000;
 const PHOTO_KEY_PATTERN =
   /^bills\/\d{1,19}\/\d{4}\/\d{2}\/\d{2}\/[A-Za-z0-9._-]+\.jpg$/;
 
-const BILL_SELECT = `
+/**
+ * 列表口径（list/today/grouped 及 update 预读）：BillVm 只需分类/支付方式字典名，
+ * 不 JOIN books/users，避免为用不到的 book_name/recorder 付费（P2-02）。
+ */
+const BILL_LIST_SELECT = `
+  SELECT b.id, b.type, b.amount, b.category_id, b.pay_method_id,
+         DATE_FORMAT(b.record_date, '%Y-%m-%d') AS record_date, b.record_time,
+         b.remark, b.book_id, b.created_at, b.updated_at,
+         c.name AS category_name, c.icon AS icon_text, c.color AS icon_color, c.bg AS icon_bg,
+         p.name AS pay_method_name
+    FROM bills b
+    JOIN categories c ON c.id = b.category_id
+    JOIN pay_methods p ON p.id = b.pay_method_id
+`;
+
+/**
+ * 详情口径（buildDetail）：BillDetailVm 额外需要 book_name/recorder，全 JOIN。
+ */
+const BILL_DETAIL_SELECT = `
   SELECT b.id, b.type, b.amount, b.category_id, b.pay_method_id,
          DATE_FORMAT(b.record_date, '%Y-%m-%d') AS record_date, b.record_time,
          b.remark, b.book_id, b.created_at, b.updated_at,
@@ -81,6 +103,13 @@ interface AggregateRow {
 
 interface CountRow {
   cnt: string | number;
+}
+
+/** grouped 日合计独立聚合行（同 scope，不受明细 LIMIT 影响）。 */
+interface DayTotalRow {
+  record_date: string;
+  expense: string | number;
+  income: string | number;
 }
 
 function billNotFound(): never {
@@ -153,7 +182,7 @@ export class BillsService {
     const total = Number(countRows[0]?.cnt ?? 0);
 
     const rows = await this.dataSource.query<BillJoinRow[]>(
-      `${BILL_SELECT} WHERE ${whereSql}
+      `${BILL_LIST_SELECT} WHERE ${whereSql}
        ORDER BY b.record_date DESC, b.record_time DESC, b.created_at DESC
        LIMIT ? OFFSET ?`,
       [...params, pageSize, (page - 1) * pageSize],
@@ -191,8 +220,9 @@ export class BillsService {
     });
 
     const rows = await this.dataSource.query<BillJoinRow[]>(
-      `${BILL_SELECT} WHERE ${whereSql}
-       ORDER BY b.record_time DESC, b.created_at DESC`,
+      `${BILL_LIST_SELECT} WHERE ${whereSql}
+       ORDER BY b.record_time DESC, b.created_at DESC
+       LIMIT ${TODAY_LIMIT}`,
       params,
     );
     const photosByBill = await this.loadPhotosMap(
@@ -246,18 +276,37 @@ export class BillsService {
       categoryId: undefined,
     });
 
-    const countRows = await this.dataSource.query<CountRow[]>(
-      `SELECT COUNT(*) AS cnt FROM bills b WHERE ${whereSql}`,
-      params,
-    );
+    // 总数、明细分页、日合计三路查询互不依赖，并行发出：
+    // 日合计必须独立聚合——明细有 GROUPED_LIMIT 截断，JS 内累加会让超限日金额失真（P2-06）
+    const [countRows, rows, dayTotalRows] = await Promise.all([
+      this.dataSource.query<CountRow[]>(
+        `SELECT COUNT(*) AS cnt FROM bills b WHERE ${whereSql}`,
+        params,
+      ),
+      this.dataSource.query<BillJoinRow[]>(
+        `${BILL_LIST_SELECT} WHERE ${whereSql}
+         ORDER BY b.record_date DESC, b.record_time DESC, b.created_at DESC
+         LIMIT ${GROUPED_LIMIT}`,
+        params,
+      ),
+      this.dataSource.query<DayTotalRow[]>(
+        `SELECT DATE_FORMAT(b.record_date, '%Y-%m-%d') AS record_date,
+                COALESCE(SUM(CASE WHEN b.type = 'expense' THEN b.amount ELSE 0 END), 0) AS expense,
+                COALESCE(SUM(CASE WHEN b.type = 'income' THEN b.amount ELSE 0 END), 0) AS income
+           FROM bills b
+          WHERE ${whereSql}
+          GROUP BY b.record_date`,
+        params,
+      ),
+    ]);
     const total = Number(countRows[0]?.cnt ?? 0);
-
-    const rows = await this.dataSource.query<BillJoinRow[]>(
-      `${BILL_SELECT} WHERE ${whereSql}
-       ORDER BY b.record_date DESC, b.record_time DESC, b.created_at DESC
-       LIMIT ${GROUPED_LIMIT}`,
-      params,
+    const dayTotals = new Map(
+      dayTotalRows.map((row) => [
+        row.record_date,
+        { expense: round2(row.expense), income: round2(row.income) },
+      ]),
     );
+
     const photosByBill = await this.loadPhotosMap(
       userId,
       rows.map((row) => String(row.id)),
@@ -277,18 +326,18 @@ export class BillsService {
       if (index === undefined) {
         index = groups.length;
         groupIndex.set(row.record_date, index);
+        // 日金额取独立聚合结果：即使当日明细被 LIMIT 截断也保持准确
+        const totals = dayTotals.get(row.record_date);
         groups.push({
           day: dayLabel(row.record_date),
           date: dateLabel(row.record_date),
           recordDate: row.record_date,
-          expense: 0,
-          income: 0,
+          expense: totals?.expense ?? 0,
+          income: totals?.income ?? 0,
           items: [],
         });
       }
-      const vm = toBillVm(row, photosByBill);
-      groups[index].items.push(vm);
-      groups[index][row.type] = round2(groups[index][row.type] + vm.amountAbs);
+      groups[index].items.push(toBillVm(row, photosByBill));
     }
 
     return {
@@ -426,8 +475,9 @@ export class BillsService {
     dto: UpdateBillDto,
   ): Promise<BillDetailVm> {
     // 事务③：校验/字典/磁盘 IO 全部在事务外完成（02 §4.2 / 05 §3.3）
+    // 预读只需 bills 列与字典名，走列表口径即可（updated_at 乐观锁比较仍由 bills 列提供）
     const baseRows = await this.dataSource.query<BillJoinRow[]>(
-      `${BILL_SELECT} WHERE b.id = ? AND b.user_id = ? LIMIT 1`,
+      `${BILL_LIST_SELECT} WHERE b.id = ? AND b.user_id = ? LIMIT 1`,
       [billId, userId],
     );
     const existing = baseRows[0];
@@ -562,35 +612,51 @@ export class BillsService {
       await this.booksService.getOwnedBookOrFail(userId, dto.bookId);
 
     // Redis 墓碑登记放在事务提交之后（05 §3.3）。
-    // 同 remove：无外键约束，先删照片行再删账单（子查询引用 bills 表，MySQL 允许）。
-    const { deletedCount, photoKeys } = await this.dataSource.transaction(
-      async (manager) => {
-        const photoWhere =
-          'WHERE user_id = ?' +
-          (dto.bookId
-            ? ' AND bill_id IN (SELECT id FROM bills WHERE book_id = ?)'
-            : '');
-        const photoRows = await manager.query<PhotoRow[]>(
-          `SELECT url FROM bill_photos ${photoWhere}`,
-          dto.bookId ? [userId, dto.bookId] : [userId],
-        );
-        await manager.query(
-          `DELETE FROM bill_photos ${photoWhere}`,
-          dto.bookId ? [userId, dto.bookId] : [userId],
-        );
-        const result = await manager.query(
-          'DELETE FROM bills WHERE user_id = ?' +
-            (dto.bookId ? ' AND book_id = ?' : ''),
-          dto.bookId ? [userId, dto.bookId] : [userId],
-        );
-        return {
-          deletedCount: Number(
+    // 大事务批量化（P2-05）：按 1000 行一批拆成独立小事务，每批先取账单 id，
+    // 同事务内收集凭证 key → 删照片行 → 删账单，累计 affectedRows。
+    // 避免一次性全量 DELETE 形成长事务大锁与巨型 binlog；返回口径与原单事务一致。
+    const photoKeys: string[] = [];
+    let deletedCount = 0;
+    for (;;) {
+      const batchAffected = await this.dataSource.transaction(
+        async (manager) => {
+          const idRows = await manager.query<Array<{ id: string | number }>>(
+            'SELECT id FROM bills WHERE user_id = ?' +
+              (dto.bookId ? ' AND book_id = ?' : '') +
+              ' ORDER BY id ASC LIMIT ?',
+            dto.bookId
+              ? [userId, dto.bookId, BATCH_SIZE]
+              : [userId, BATCH_SIZE],
+          );
+          if (idRows.length === 0) return 0;
+          const ids = idRows.map((row) => String(row.id));
+          const idPlaceholders = ids.map(() => '?').join(',');
+
+          // 同 remove：无外键约束，照片行必须显式删除，先查 key 供 7 天墓碑保留
+          const photoRows = await manager.query<PhotoRow[]>(
+            `SELECT url FROM bill_photos
+              WHERE user_id = ? AND bill_id IN (${idPlaceholders})`,
+            [userId, ...ids],
+          );
+          await manager.query(
+            `DELETE FROM bill_photos
+              WHERE user_id = ? AND bill_id IN (${idPlaceholders})`,
+            [userId, ...ids],
+          );
+          const result = await manager.query(
+            `DELETE FROM bills WHERE user_id = ? AND id IN (${idPlaceholders})`,
+            [userId, ...ids],
+          );
+          photoKeys.push(...photoRows.map((row) => row.url));
+          return Number(
             (result as { affectedRows?: number }).affectedRows ?? 0,
-          ),
-          photoKeys: photoRows.map((row) => row.url),
-        };
-      },
-    );
+          );
+        },
+      );
+      // 本批选中的账单在事务内必然删除，affectedRows 为 0 即无剩余数据
+      if (batchAffected === 0) break;
+      deletedCount += batchAffected;
+    }
 
     await this.cleanupService.markBillPhotosTombstone(photoKeys);
     // 收尾失效：整体清空跨所有月份/账本维度，SCAN 失效该用户全部统计缓存
@@ -662,7 +728,8 @@ export class BillsService {
       bookId: query.bookId,
       type: query.type && query.type !== 'ALL' ? query.type : undefined,
       categoryId: query.categoryId,
-      keyword: typeof query.keyword === 'string' ? query.keyword.trim() : undefined,
+      keyword:
+        typeof query.keyword === 'string' ? query.keyword.trim() : undefined,
     });
   }
 
@@ -730,7 +797,7 @@ export class BillsService {
   ): Promise<BillDetailVm> {
     const executor = manager ?? this.dataSource;
     const rows = await executor.query<BillJoinRow[]>(
-      `${BILL_SELECT} WHERE b.id = ? AND b.user_id = ? LIMIT 1`,
+      `${BILL_DETAIL_SELECT} WHERE b.id = ? AND b.user_id = ? LIMIT 1`,
       [billId, userId],
     );
     const row = rows[0];
@@ -781,12 +848,17 @@ export class BillsService {
     userId: string,
     keys: string[],
   ): Promise<void> {
-    for (const [index, key] of keys.entries()) {
-      await manager.query(
-        'INSERT INTO bill_photos (bill_id, user_id, url, sort_order) VALUES (?, ?, ?, ?)',
-        [billId, userId, key, index],
-      );
-    }
+    if (keys.length === 0) return;
+    // 多行 VALUES 单条 INSERT（凭证上限 3 张）：sort_order 即数组下标，避免逐条 RTT
+    const placeholders = keys.map(() => '(?, ?, ?, ?)').join(', ');
+    const params: Array<string | number> = [];
+    keys.forEach((key, index) => {
+      params.push(billId, userId, key, index);
+    });
+    await manager.query(
+      `INSERT INTO bill_photos (bill_id, user_id, url, sort_order) VALUES ${placeholders}`,
+      params,
+    );
   }
 
   private async normalizeCreate(
@@ -794,17 +866,21 @@ export class BillsService {
     dto: CreateBillDto,
   ): Promise<NormalizedBillInput> {
     const type = dto.type ?? 'expense';
-    await this.categoriesService.getCategoryOrFail(dto.categoryId, type);
-    await this.payMethodsService.getPayMethodOrFail(dto.payMethodId);
-    const bookId = await this.resolveBookId(userId, dto.bookId);
-    const { amount, recordDate, recordTime, remark, photos } =
-      await this.validateCommonFields(userId, {
+    // 分类 / 支付方式 / 账本归属三次校验与字段校验（含凭证异步 HEAD）互不依赖，
+    // 并行发出把串行 4 轮 RTT 压成 1 轮；任一失败 Promise.all 即按原错误拒绝
+    const [bookId, validated] = await Promise.all([
+      this.resolveBookId(userId, dto.bookId),
+      this.validateCommonFields(userId, {
         amount: dto.amount,
         date: dto.date,
         time: dto.time,
         remark: dto.remark,
         photos: dto.photos,
-      });
+      }),
+      this.categoriesService.getCategoryOrFail(dto.categoryId, type),
+      this.payMethodsService.getPayMethodOrFail(dto.payMethodId),
+    ]);
+    const { amount, recordDate, recordTime, remark, photos } = validated;
     return {
       type,
       amount,
@@ -826,21 +902,20 @@ export class BillsService {
     const type = dto.type ?? existing.type;
     const categoryId = dto.categoryId ?? String(existing.category_id);
     const payMethodId = dto.payMethodId ?? String(existing.pay_method_id);
-    await this.categoriesService.getCategoryOrFail(categoryId, type);
-    await this.payMethodsService.getPayMethodOrFail(payMethodId);
-    const bookId = await this.resolveBookId(
-      userId,
-      dto.bookId ?? String(existing.book_id),
-    );
-
-    const cleaned = await this.validateCommonFields(userId, {
-      amount: dto.amount ?? existing.amount,
-      date: dto.date ?? existing.record_date,
-      time: dto.time ?? existing.record_time.slice(0, 5),
-      remark: dto.remark ?? existing.remark,
-      photos: dto.photos,
-      partial: dto.photos === undefined,
-    });
+    // 同 normalizeCreate：字典/账本归属/字段校验互不依赖，并行收敛 RTT
+    const [bookId, cleaned] = await Promise.all([
+      this.resolveBookId(userId, dto.bookId ?? String(existing.book_id)),
+      this.validateCommonFields(userId, {
+        amount: dto.amount ?? existing.amount,
+        date: dto.date ?? existing.record_date,
+        time: dto.time ?? existing.record_time.slice(0, 5),
+        remark: dto.remark ?? existing.remark,
+        photos: dto.photos,
+        partial: dto.photos === undefined,
+      }),
+      this.categoriesService.getCategoryOrFail(categoryId, type),
+      this.payMethodsService.getPayMethodOrFail(payMethodId),
+    ]);
 
     return {
       type,
@@ -959,8 +1034,15 @@ export class BillsService {
       try {
         await this.booksService.assertOwnedBook(userId, activeBookId);
         return activeBookId;
-      } catch {
-        // 激活态异常时回退默认账本
+      } catch (error) {
+        // 仅吞「账本不存在/无归属」(40401) 回退默认账本；
+        // DB 故障等其余错误必须重抛，不能静默掩盖基础设施异常
+        if (
+          !(error instanceof BusinessException) ||
+          error.bizCode !== ERROR_CODES.BOOK_NOT_FOUND.code
+        ) {
+          throw error;
+        }
       }
     }
     const rows = await this.dataSource.query<Array<{ id: string | number }>>(

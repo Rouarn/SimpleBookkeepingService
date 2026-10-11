@@ -13,6 +13,7 @@ import type { Observable } from 'rxjs';
 import { finalize, tap } from 'rxjs';
 import type { AuthUser } from '../decorators/current-user.decorator.js';
 import { requestContext } from '../context/trace.context.js';
+import { pickTrustedRequestId } from '../constants/request-id.js';
 
 interface RequestWithMeta {
   headers: Record<string, string | string[] | undefined>;
@@ -24,8 +25,15 @@ interface RequestWithMeta {
 const SKIP_BIZ_CODES = new Set([40100, 40101]);
 
 /**
+ * 基础设施探针路径（P2-10）：liveness 5s/次、readiness 同频，
+ * 高频且无业务价值，统一不生成 trace、不落 operation_logs。
+ */
+const PROBE_PATHS = new Set(['/health', '/health/live', '/health/ready']);
+
+/**
  * 最外层拦截器（05 §4）：
- * 1. 生成/透传 traceId（X-Request-Id，32 位 hex），响应头原样回传；
+ * 1. 生成/透传 traceId（P2-11：仅内网可信代理传入的 X-Request-Id
+ *    且匹配 ^[a-zA-Z0-9_-]{8,64}$ 才透传，其余服务端生成 32 位 hex），响应头回传；
  * 2. 经 AsyncLocalStorage 在整条调用链透传；
  * 3. 结束后异步落 operation_logs 审计（只记元数据，不记请求/响应体，失败仅告警）。
  *    审计瘦身（防写放大与审计表被恶意灌爆）：签名图片 GET（全站最高频端点）、
@@ -46,19 +54,16 @@ export class LoggingInterceptor implements NestInterceptor {
       statusCode: number;
     }>();
 
-    // 存活探针高频（5s/次）：不落 operation_logs，也不生成 trace
-    if ((request.url ?? '').split('?')[0] === '/health') {
+    // 健康探针高频（liveness 5s/次）：不落 operation_logs，也不生成 trace
+    if (PROBE_PATHS.has((request.url ?? '').split('?')[0])) {
       return next.handle();
     }
 
-    const headerRequestId = request.headers['x-request-id'];
-    const requestId = Array.isArray(headerRequestId)
-      ? headerRequestId[0]
-      : headerRequestId;
+    // P2-11：X-Request-Id 仅在来源为内网可信代理且形态合法
+    //（8~64 位字母数字/_-）时透传，否则服务端生成，防公网伪造 traceId 污染审计
     const traceId =
-      requestId && /^[a-f0-9]{32}$/i.test(requestId)
-        ? requestId.toLowerCase()
-        : randomBytes(16).toString('hex');
+      pickTrustedRequestId(request.headers['x-request-id'], request.ip) ??
+      randomBytes(16).toString('hex');
     response.setHeader('X-Request-Id', traceId);
 
     const start = Date.now();

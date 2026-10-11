@@ -35,14 +35,14 @@ export class UploadsController {
   @UploadThrottle()
   @UseInterceptors(FileInterceptor('file'))
   @ApiConsumes('multipart/form-data')
-  @ApiOperation({ summary: '上传账单凭证图片（scene=bill/avatar）' })
+  @ApiOperation({ summary: '上传账单凭证图片（scene 仅支持 bill）' })
   @ApiBody({
     schema: {
       type: 'object',
       required: ['file'],
       properties: {
         file: { type: 'string', format: 'binary' },
-        scene: { type: 'string', enum: ['bill', 'avatar'], default: 'bill' },
+        scene: { type: 'string', enum: ['bill'], default: 'bill' },
       },
     },
   })

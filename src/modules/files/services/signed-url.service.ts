@@ -12,7 +12,8 @@ export interface SignedFileUrl {
 
 /**
  * 文件访问签名（03 §8 / 07 §4.3）：
- * sign = HMAC_SHA256(FILES_SIGN_SECRET, key + '.' + e)，默认 12h 有效。
+ * sign = HMAC_SHA256(FILES_SIGN_SECRET, key + '.' + e)，默认 30 分钟有效
+ * （P2-09：由 12h 缩短至 1800s，仍可由 FILES_LINK_TTL 环境变量覆盖）。
  */
 @Injectable()
 export class SignedUrlService {

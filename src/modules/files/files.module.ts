@@ -28,6 +28,11 @@ import { multerImageFileFilter } from './uploads/multer-image.filter.js';
           fileSize:
             configService.get<AppConfig['uploads']>('uploads')!.maxSizeBytes,
           files: 1,
+          // 非文件表单字段限制（P2-08）：收敛 multipart 解析资源占用，
+          // 当前上传接口仅 1 个业务字段 scene，留足正常客户端余量
+          fields: 10,
+          fieldSize: 4 * 1024,
+          parts: 20,
         },
         fileFilter: multerImageFileFilter,
       }),

@@ -30,6 +30,9 @@ export interface SavedImage {
 const KEY_PATTERN =
   /^(bills|avatars)\/\d{1,19}(\/\d{4}\/\d{2}\/\d{2})?\/[A-Za-z0-9._-]+\.jpg$/;
 
+/** wx 独占写发生 EEXIST 碰撞时的最大尝试次数（含首次写入） */
+const KEY_WRITE_MAX_ATTEMPTS = 3;
+
 function pad2(n: number): string {
   return String(n).padStart(2, '0');
 }
@@ -125,8 +128,25 @@ export class StorageService implements OnModuleInit {
     }
 
     const finalMeta = await sharp(output).metadata();
-    const key = this.buildKey(userId, scene);
-    await this.writeKey(key, output);
+
+    // wx 独占写碰撞（EEXIST）时重新生成随机 key 重试，最多 3 次，而非直接 500
+    let key = '';
+    let written = false;
+    for (let attempt = 1; attempt <= KEY_WRITE_MAX_ATTEMPTS; attempt += 1) {
+      key = this.buildKey(userId, scene);
+      try {
+        await this.writeKey(key, output);
+        written = true;
+        break;
+      } catch (error) {
+        if ((error as { code?: string }).code !== 'EEXIST') throw error;
+        this.logger.warn(`文件名碰撞，第 ${attempt} 次重新生成 key: ${key}`);
+      }
+    }
+    if (!written) {
+      this.logger.error('文件名连续碰撞，写入失败');
+      storageUnavailable(ERROR_CODES.STORAGE_UNAVAILABLE.message);
+    }
 
     return {
       key,
@@ -173,7 +193,8 @@ export class StorageService implements OnModuleInit {
     const stamp =
       `${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}` +
       `-${pad2(now.getHours())}${pad2(now.getMinutes())}${pad2(now.getSeconds())}`;
-    const rand = randomBytes(4).toString('hex');
+    // crypto.randomBytes 随机源 16 字节 → 32 位 hex，防文件名猜测与碰撞
+    const rand = randomBytes(16).toString('hex');
     if (scene === 'avatar') {
       return `avatars/${userId}/avatar-${stamp}-${rand}.jpg`;
     }
@@ -189,8 +210,7 @@ export class StorageService implements OnModuleInit {
       storageUnavailable(ERROR_CODES.STORAGE_UNAVAILABLE.message);
     }
     try {
-      await mkdir(resolve(absolute, '..'), { recursive: true, mode: 0o700 });
-      await this.chmodParentDirs(key);
+      await this.ensureParentDir(absolute);
       await writeFile(absolute, buffer, { mode: 0o600, flag: 'wx' });
       await chmod(absolute, 0o600);
     } catch (error) {
@@ -208,13 +228,23 @@ export class StorageService implements OnModuleInit {
     }
   }
 
-  /** 将 key 涉及的新建目录权限收敛为 0700。 */
-  private async chmodParentDirs(key: string): Promise<void> {
-    const segments = key.split('/').slice(0, -1);
-    let current = this.rootDir;
-    for (const segment of segments) {
-      current = resolve(current, segment);
-      await chmod(current, 0o700).catch(() => undefined);
+  /**
+   * 确保父目录存在且权限收敛：
+   * 仅当叶子目录（账单场景即当日 YYYY/MM/DD 目录、头像场景即用户目录）
+   * 为本次写入新建时 chmod 0700 一次；已存在目录一律不重复 chmod，
+   * 避免每次上传都对全路径逐级 chmod。新建的中间目录由 mkdir mode 0o700 指定权限。
+   */
+  private async ensureParentDir(absolute: string): Promise<void> {
+    const parent = resolve(absolute, '..');
+    let newlyCreated = false;
+    try {
+      await access(parent, fsConstants.R_OK | fsConstants.W_OK);
+    } catch {
+      newlyCreated = true;
+    }
+    await mkdir(parent, { recursive: true, mode: 0o700 });
+    if (newlyCreated) {
+      await chmod(parent, 0o700).catch(() => undefined);
     }
   }
 

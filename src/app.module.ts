@@ -70,7 +70,15 @@ import { HealthModule } from './modules/health/health.module.js';
               }),
             },
             autoLogging: {
-              ignore: (req) => (req as { url?: string }).url === '/health',
+              // 三个探针端点均不打 access log（/health 为 liveness 别名）
+              ignore: (req) => {
+                const path = (req as { url?: string }).url?.split('?')[0];
+                return (
+                  path === '/health' ||
+                  path === '/health/live' ||
+                  path === '/health/ready'
+                );
+              },
             },
           },
         };

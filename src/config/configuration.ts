@@ -50,6 +50,16 @@ export interface AppConfig {
     issuer: string;
     /** JWT 标准声明 aud：目标受众标识（P1-05） */
     audience: string;
+    /** refresh token 哈希的服务端 pepper（P2-13）：HMAC-SHA256(pepper, token) 入库 */
+    refreshPepper: string;
+  };
+  swagger: {
+    /** 是否挂载 /api/docs：development 默认 true，production 仅 ENABLE_SWAGGER=true 时挂载 */
+    enabled: boolean;
+    /** 文档 Basic Auth 账号（生产开启时必填，env 校验拦截） */
+    basicUser: string;
+    /** 文档 Basic Auth 密码（生产开启时必填且 >=16 字节） */
+    basicPassword: string;
   };
   uploads: {
     dir: string;
@@ -125,6 +135,17 @@ export default (): AppConfig => {
       refreshTtlSeconds: parseTtlSeconds(refreshTtl),
       issuer: 'simple-bookkeeping',
       audience: 'xiaolv-app',
+      refreshPepper: readString(process.env, 'REFRESH_PEPPER'),
+    },
+    swagger: {
+      // development 默认挂载文档；production 默认关闭，须显式 ENABLE_SWAGGER=true
+      enabled: readBoolean(
+        process.env,
+        'ENABLE_SWAGGER',
+        nodeEnv !== 'production',
+      ),
+      basicUser: (process.env.SWAGGER_BASIC_USER ?? '').trim(),
+      basicPassword: process.env.SWAGGER_BASIC_PASSWORD ?? '',
     },
     uploads: {
       dir: readString(process.env, 'UPLOAD_DIR', './uploads'),
@@ -137,7 +158,7 @@ export default (): AppConfig => {
       filesLinkTtlSeconds: readInt(
         process.env,
         'FILES_LINK_TTL',
-        12 * 3600,
+        1800,
         60,
         7 * 86400,
       ),

@@ -3,7 +3,7 @@
  *
  * 产物：
  *   deploy/                        可直接整体上传的部署目录
- *     ├─ dist/                     nest build 的编译产物（剔除 .d.ts）
+ *     ├─ dist/                     nest build 的编译产物（剔除 .d.ts/.js.map/.tsbuildinfo）
  *     ├─ package.json              依赖清单与启动脚本（原样保留，配合 pnpm install --prod）
  *     ├─ pnpm-lock.yaml            锁定依赖版本
  *     ├─ pnpm-workspace.yaml       bcrypt 原生编译的 allowBuilds 审批，缺少会导致 pnpm 跳过编译
@@ -31,6 +31,14 @@ function run(cmd, args) {
     cwd: root,
     stdio: 'inherit',
     shell: process.platform === 'win32',
+    // P2-13：构建环境关闭遥测。pnpm 本身无遥测；npm_config_telemetry=false
+    // 关闭 npm 遥测，DO_NOT_TRACK=1 是通用退出信号（部分工具链识别）。
+    env: {
+      ...process.env,
+      npm_config_telemetry: 'false',
+      NPM_CONFIG_TELEMETRY: 'false',
+      DO_NOT_TRACK: '1',
+    },
   });
   if (result.status !== 0) {
     console.error(`命令执行失败: ${cmd} ${args.join(' ')}`);
@@ -38,7 +46,11 @@ function run(cmd, args) {
   }
 }
 
-/** 递归复制目录，剔除声明文件与构建缓存（运行时只需要 .js / sourcemap）。 */
+/**
+ * 递归复制目录，剔除声明文件、构建缓存与 sourcemap（运行时只需要 .js）。
+ * P2-13：.js.map 不随部署包分发——sourcemap 含内部源码符号（文件路径/行号/
+ * 函数名），属于内部符号库，应另行集中存放并在排障时按需取用，不能留在可下载产物侧。
+ */
 async function copyDist(src, dest) {
   await mkdir(dest, { recursive: true });
   for (const entry of await readdir(src, { withFileTypes: true })) {
@@ -49,6 +61,7 @@ async function copyDist(src, dest) {
     } else if (
       entry.isFile() &&
       !entry.name.endsWith('.d.ts') &&
+      !entry.name.endsWith('.js.map') &&
       !entry.name.endsWith('.tsbuildinfo')
     ) {
       await copyFile(srcPath, destPath);

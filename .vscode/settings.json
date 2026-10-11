@@ -1,0 +1,9 @@
+{
+  "explorer.fileNesting.enabled": true,
+  "explorer.fileNesting.expand": false,
+  "explorer.fileNesting.patterns": {
+    "package.json": "package-lock.json, pnpm-lock.yaml, pnpm-workspace.yaml, eslint.config.mjs, .prettierrc, .npmrc, .nvmrc, .node-version, tsconfig.base.json, .oxlintrc.json",
+    "tsconfig.json": "tsconfig.*.json",
+    ".env": ".env.*, .envrc, env.d.ts"
+  }
+}

@@ -32,7 +32,8 @@ export class UserPreference {
   @JoinColumn({ name: 'user_id' })
   user?: User;
 
-  @Index('idx_active_book')
+  // idx_active_book 已删除：全库对 user_preferences 的 WHERE 只有 user_id
+  // （uk_user 唯一索引覆盖），active_book_id 无独立过滤查询（P2-04）
   @Column({
     type: 'bigint',
     unsigned: true,
@@ -78,7 +79,7 @@ export class UserPreference {
   })
   lastBillType: ExpenseIncome;
 
-  @Index('idx_last_pay')
+  // idx_last_pay 已删除：last_pay_method_id 仅随整行按 user_id 读写，无 WHERE 使用（P2-04）
   @Column({
     type: 'bigint',
     unsigned: true,
@@ -94,7 +95,7 @@ export class UserPreference {
   @JoinColumn({ name: 'last_pay_method_id' })
   lastPayMethod?: PayMethod | null;
 
-  @Index('idx_last_cat_exp')
+  // idx_last_cat_exp 已删除：last_category_expense_id 仅随整行按 user_id 读写，无 WHERE 使用（P2-04）
   @Column({
     type: 'bigint',
     unsigned: true,
@@ -110,7 +111,7 @@ export class UserPreference {
   @JoinColumn({ name: 'last_category_expense_id' })
   lastCategoryExpense?: Category | null;
 
-  @Index('idx_last_cat_inc')
+  // idx_last_cat_inc 已删除：last_category_income_id 仅随整行按 user_id 读写，无 WHERE 使用（P2-04）
   @Column({
     type: 'bigint',
     unsigned: true,

@@ -4,7 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, type EntityManager } from 'typeorm';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import type { AppConfig } from '../../../config/configuration.js';
 import { BusinessException } from '../../../common/exceptions/business.exception.js';
 import { ERROR_CODES } from '../../../common/exceptions/error-codes.js';
@@ -60,7 +60,8 @@ function invalidRefresh(): never {
 /**
  * 双令牌服务（07 §3）：
  * - access JWT（默认 30m）无状态，载荷 sub/jti/iat/exp/type/ver（P1-01 token 版本）；
- * - refresh JWT（30d）仅以 SHA256 形态入库；
+ * - refresh JWT（30d）仅以 HMAC-SHA256 形态入库（P2-13：密钥为服务端 REFRESH_PEPPER，
+ *   库泄漏时无 pepper 无法离线枚举/碰撞，优于无盐 SHA-256）；
  * - 刷新即轮换；已吊销令牌再次出现 → 吊销该用户全部 refresh（疑似泄漏）；
  * - 并发轮换竞争走幂等映射（P1-02），良性并发不再连坐吊销。
  */
@@ -322,8 +323,15 @@ export class TokenService {
     return payload;
   }
 
+  /**
+   * refresh token 存储哈希（P2-13）：HMAC-SHA256(REFRESH_PEPPER, token)。
+   * 注意：更换 pepper（或首次上线本算法）后历史哈希全部失配，
+   * 存量 refresh token 会失效，用户需用账号密码重新登录。
+   */
   private hashToken(token: string): string {
-    return createHash('sha256').update(token).digest('hex');
+    return createHmac('sha256', this.jwtConfig.refreshPepper)
+      .update(token)
+      .digest('hex');
   }
 
   /** 读取用户 token_version（签发 access JWT 的 ver 声明用）。 */

@@ -10,6 +10,8 @@ import type { UpdateBookDto } from '../dto/update-book.dto.js';
 import { toBookVm, type BookRow, type BookVm } from '../vo/book.vo.js';
 
 const MAX_BOOKS_PER_USER = 20;
+/** 删账本时账单迁移按 1000 行一批拆成小事务，避免单条全量 UPDATE 形成大事务 */
+const MIGRATE_BATCH_SIZE = 1000;
 
 const BOOK_SELECT_COLUMNS = `
   b.id, b.name, b.budget, b.is_default, b.sort_order, b.created_at,
@@ -196,42 +198,59 @@ export class BooksService {
       await this.assertOwnedBook(userId, migrateBookId);
     }
 
-    const migratedBillCount = await this.dataSource.transaction(
-      async (manager) => {
-        let migrated = 0;
-        if (billCount > 0 && migrateBookId) {
-          const migrateResult = await manager.query(
-            'UPDATE bills SET book_id = ? WHERE book_id = ? AND user_id = ?',
-            [migrateBookId, bookId, userId],
-          );
-          migrated = Number(
-            (migrateResult as { changedRows?: number }).changedRows ?? 0,
-          );
-        }
-
-        const deleteResult = await manager.query(
-          'DELETE FROM books WHERE id = ? AND user_id = ? AND is_default = 0',
-          [bookId, userId],
+    // 大事务批量化（P2-05）：账单迁移按 1000 行一批拆成独立小事务循环，
+    // 每批先选 id 再按 id UPDATE，累计 changedRows，口径与原单条 UPDATE 一致。
+    let migratedBillCount = 0;
+    if (billCount > 0 && migrateBookId) {
+      for (;;) {
+        const batchChanged = await this.dataSource.transaction(
+          async (manager) => {
+            const idRows = await manager.query<Array<{ id: string | number }>>(
+              'SELECT id FROM bills WHERE book_id = ? AND user_id = ? ORDER BY id ASC LIMIT ?',
+              [bookId, userId, MIGRATE_BATCH_SIZE],
+            );
+            if (idRows.length === 0) return 0;
+            const ids = idRows.map((row) => String(row.id));
+            const placeholders = ids.map(() => '?').join(',');
+            // 带源 book_id 条件：并发改账本时只迁移本批仍归属源账本的行
+            const migrateResult = await manager.query(
+              `UPDATE bills SET book_id = ?
+                WHERE id IN (${placeholders}) AND book_id = ? AND user_id = ?`,
+              [migrateBookId, ...ids, bookId, userId],
+            );
+            return Number(
+              (migrateResult as { changedRows?: number }).changedRows ?? 0,
+            );
+          },
         );
-        if ((deleteResult as { affectedRows?: number }).affectedRows !== 1) {
-          throw new BusinessException(
-            ERROR_CODES.DEFAULT_BOOK_PROTECTED.code,
-            ERROR_CODES.DEFAULT_BOOK_PROTECTED.httpStatus,
-            ERROR_CODES.DEFAULT_BOOK_PROTECTED.message,
-          );
-        }
+        // 选中的行 book_id 必由源账本改为目标账本，changedRows 为 0 即迁移完成
+        if (batchChanged === 0) break;
+        migratedBillCount += batchChanged;
+      }
+    }
 
-        // 若删除的是激活账本，激活态重置为默认账本
-        await manager.query(
-          `UPDATE user_preferences
-            SET active_book_id = (SELECT id FROM (SELECT id FROM books WHERE user_id = ? AND is_default = 1 LIMIT 1) AS d)
-          WHERE user_id = ? AND active_book_id = ?`,
-          [userId, userId, bookId],
+    // 账单迁移完成后，删账本与激活态修正在同一小事务内（books/preferences 各至多 1 行）
+    await this.dataSource.transaction(async (manager) => {
+      const deleteResult = await manager.query(
+        'DELETE FROM books WHERE id = ? AND user_id = ? AND is_default = 0',
+        [bookId, userId],
+      );
+      if ((deleteResult as { affectedRows?: number }).affectedRows !== 1) {
+        throw new BusinessException(
+          ERROR_CODES.DEFAULT_BOOK_PROTECTED.code,
+          ERROR_CODES.DEFAULT_BOOK_PROTECTED.httpStatus,
+          ERROR_CODES.DEFAULT_BOOK_PROTECTED.message,
         );
+      }
 
-        return migrated;
-      },
-    );
+      // 若删除的是激活账本，激活态重置为默认账本
+      await manager.query(
+        `UPDATE user_preferences
+          SET active_book_id = (SELECT id FROM (SELECT id FROM books WHERE user_id = ? AND is_default = 1 LIMIT 1) AS d)
+        WHERE user_id = ? AND active_book_id = ?`,
+        [userId, userId, bookId],
+      );
+    });
 
     return { id: bookId, deleted: true, migratedBillCount };
   }

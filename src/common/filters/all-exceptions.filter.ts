@@ -12,6 +12,7 @@ import { BusinessException } from '../exceptions/business.exception.js';
 import { ERROR_CODES } from '../exceptions/error-codes.js';
 import { getTraceId } from '../context/trace.context.js';
 import { formatTimestamp } from '../utils/date.util.js';
+import { pickTrustedRequestId } from '../constants/request-id.js';
 
 interface ErrorBody {
   code: number;
@@ -44,14 +45,16 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const response = ctx.getResponse<Response>();
     const request = ctx.getRequest<Request>();
 
-    // /health 失败保持 Terminus 原始探针响应（503 + 指标详情）
+    // P2-10：readiness 失败对外只回静态 {status:'error'}，不泄露内网地址/端口等拓扑；
+    // 完整探针细节（含 127.0.0.1:6379 等）仅写服务端日志。liveness 为静态响应不会走到这里。
     if (
-      (request.url ?? '').split('?')[0] === '/health' &&
+      (request.url ?? '').split('?')[0] === '/health/ready' &&
       exception instanceof HttpException
     ) {
-      response
-        .status(exception.getStatus())
-        .json(exception.getResponse() as Record<string, unknown>);
+      this.logger.error(
+        `readiness 探针失败 ${exception.getStatus()}: ${this.safeStringify(exception.getResponse())}`,
+      );
+      response.status(exception.getStatus()).json({ status: 'error' });
       return;
     }
 
@@ -165,7 +168,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
       case HttpStatus.UNAUTHORIZED:
         return ERROR_CODES.UNAUTHORIZED.code;
       case HttpStatus.FORBIDDEN:
-        return ERROR_CODES.ACCOUNT_FROZEN.code;
+        // P2-11：账号冻结由 BusinessException(40300) 先走业务分支；
+        // 落到这里的裸 ForbiddenException 是其他权限问题，不再误报「账号已冻结」
+        return ERROR_CODES.FORBIDDEN_OPERATION.code;
       case HttpStatus.NOT_FOUND:
         return FRAMEWORK_CODES.ROUTE_NOT_FOUND;
       case HttpStatus.METHOD_NOT_ALLOWED:
@@ -197,7 +202,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       case HttpStatus.UNAUTHORIZED:
         return ERROR_CODES.UNAUTHORIZED.message;
       case HttpStatus.FORBIDDEN:
-        return ERROR_CODES.ACCOUNT_FROZEN.message;
+        return ERROR_CODES.FORBIDDEN_OPERATION.message;
       case HttpStatus.NOT_FOUND:
         return '接口不存在';
       case HttpStatus.METHOD_NOT_ALLOWED:
@@ -221,11 +226,27 @@ export class AllExceptionsFilter implements ExceptionFilter {
     );
   }
 
+  /**
+   * 兜底 traceId（守卫在拦截器之前抛错时 ALS 内尚无 traceId）：
+   * P2-11 仅信任内网代理（req.ip 属 10/8、172.16-31/12、192.168/16、127/8）
+   * 传入且形态合法（8~64 位字母数字/_-）的 X-Request-Id，否则服务端生成，
+   * 避免公网客户端伪造 traceId 污染审计/日志关联。
+   */
   private fallbackTraceId(request: Request): string {
-    const header = request.headers['x-request-id'];
-    const value = Array.isArray(header) ? header[0] : header;
-    return value && /^[a-f0-9]{32}$/i.test(value)
-      ? value.toLowerCase()
-      : randomBytes(16).toString('hex');
+    // P2-11：仅内网可信代理传入且形态合法的 X-Request-Id 才透传，否则服务端生成
+    return (
+      pickTrustedRequestId(request.headers['x-request-id'], request.ip) ??
+      randomBytes(16).toString('hex')
+    );
+  }
+
+  /** 探针细节安全序列化：只用于服务端日志，长度截断防日志注入/放大。 */
+  private safeStringify(payload: unknown): string {
+    try {
+      const text = JSON.stringify(payload);
+      return text.length <= 1000 ? text : `${text.slice(0, 1000)}...(截断)`;
+    } catch {
+      return '[无法序列化的探针错误详情]';
+    }
   }
 }

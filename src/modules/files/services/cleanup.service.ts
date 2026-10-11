@@ -15,6 +15,10 @@ import { StorageService } from './storage.service.js';
 
 const ORPHAN_RETENTION_MS = 24 * 60 * 60_000; // 未被账单引用的孤儿文件 24h
 const TOMBSTONE_RETENTION_SECONDS = 7 * 24 * 60 * 60; // 误删申诉窗口 7 天
+/** 墓碑 ZSET 陈旧成员上限（P2-08）：score 早于 30 天前的残留成员每日开头摘除 */
+const STALE_TOMBSTONE_RETENTION_SECONDS = 30 * 24 * 60 * 60;
+/** 引用集合按主键游标分批加载，每批 1000 行，避免大表全量结果集撑爆内存 */
+const REFERENCE_BATCH_SIZE = 1000;
 /** 选主锁 TTL 兜底（P1-20）：按任务预估时长 10 分钟 */
 const CLEANUP_LOCK_TTL_SECONDS = 10 * 60;
 
@@ -53,6 +57,8 @@ export class CleanupService {
       CLEANUP_LOCK_TTL_SECONDS,
       async () => {
         try {
+          // 先摘除两个墓碑 ZSET 中 30 天前的陈旧成员，再执行文件回收
+          await this.purgeStaleTombstones();
           await this.cleanBills();
           await this.cleanAvatars();
           await this.checkDiskSpace();
@@ -68,7 +74,32 @@ export class CleanupService {
     if (valid.length === 0) return;
     const now = Math.floor(Date.now() / 1000);
     const args = valid.flatMap((key) => [now, key]);
+    // 显式不带 NX/GT：member 已存在时总是把 score 刷新为当前时刻，
+    // 重复登记只顺延、不缩短误删申诉窗口
     await this.redis.zadd(redisKey, ...args);
+  }
+
+  /**
+   * 墓碑 ZSET 陈旧成员清理（P2-08）：
+   * 正常成员满 7 天随文件物理删除被 ZREM；因 ZREM 失败、文件被外部手工删除等
+   * 异常路径滞留的成员无上限堆积，故每日任务开头统一摘除 score 早于 30 天前的成员。
+   */
+  private async purgeStaleTombstones(): Promise<void> {
+    const cutoff =
+      Math.floor(Date.now() / 1000) - STALE_TOMBSTONE_RETENTION_SECONDS;
+    for (const redisKey of [
+      REDIS_KEYS.tombstoneBills,
+      REDIS_KEYS.tombstoneAvatars,
+    ]) {
+      const removed = await this.redis.zremrangebyscore(
+        redisKey,
+        '-inf',
+        cutoff,
+      );
+      if (removed > 0) {
+        this.logger.log(`墓碑陈旧成员清理 ${redisKey}：摘除 ${removed} 个`);
+      }
+    }
   }
 
   private async cleanBills(): Promise<void> {
@@ -149,18 +180,53 @@ export class CleanupService {
     this.logger.log(`历史头像清理完成，删除 ${removed} 个文件`);
   }
 
+  /**
+   * 按主键游标分批（1000/批）加载全部账单凭证 key 引用集合，
+   * 避免 bill_photos 全表 SELECT url 一次性灌入内存。
+   */
   private async loadReferencedBillKeys(): Promise<Set<string>> {
-    const rows = await this.dataSource.query<Array<{ url: string }>>(
-      'SELECT url FROM bill_photos',
-    );
-    return new Set(rows.map((row) => row.url));
+    const keys = new Set<string>();
+    let cursor = '0';
+    for (;;) {
+      const rows = await this.dataSource.query<
+        Array<{ id: string; url: string }>
+      >(
+        `SELECT id, url FROM bill_photos
+          WHERE id > ? ORDER BY id ASC LIMIT ${REFERENCE_BATCH_SIZE}`,
+        [cursor],
+      );
+      for (const row of rows) {
+        keys.add(row.url);
+        cursor = row.id;
+      }
+      if (rows.length < REFERENCE_BATCH_SIZE) break;
+    }
+    return keys;
   }
 
+  /**
+   * 按主键游标分批（1000/批）加载当前头像 key 集合，
+   * 避免 users 全表 SELECT avatar_url 一次性灌入内存。
+   */
   private async loadCurrentAvatars(): Promise<Set<string>> {
-    const rows = await this.dataSource.query<Array<{ avatar_url: string }>>(
-      "SELECT avatar_url FROM users WHERE avatar_url LIKE 'avatars/%'",
-    );
-    return new Set(rows.map((row) => row.avatar_url));
+    const keys = new Set<string>();
+    let cursor = '0';
+    for (;;) {
+      const rows = await this.dataSource.query<
+        Array<{ id: string; avatar_url: string | null }>
+      >(
+        `SELECT id, avatar_url FROM users
+          WHERE id > ? AND avatar_url LIKE 'avatars/%'
+          ORDER BY id ASC LIMIT ${REFERENCE_BATCH_SIZE}`,
+        [cursor],
+      );
+      for (const row of rows) {
+        if (row.avatar_url) keys.add(row.avatar_url);
+        cursor = row.id;
+      }
+      if (rows.length < REFERENCE_BATCH_SIZE) break;
+    }
+    return keys;
   }
 
   private async loadTombstones(redisKey: string): Promise<Map<string, number>> {

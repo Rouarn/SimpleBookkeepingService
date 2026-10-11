@@ -118,11 +118,13 @@ export function validateEnv(env: NodeJS.ProcessEnv): void {
     errors.push('[env] 生产环境必须设置非空的 REDIS_PASSWORD');
   }
 
-  // JWT/文件签名密钥：长度 >=32 字节 + 弱密钥片段与熵检测（P1-05）
+  // JWT/文件签名/refresh pepper 密钥：长度 >=32 字节 + 弱密钥片段与熵检测（P1-05/P2-13）
   for (const key of [
     'JWT_ACCESS_SECRET',
     'JWT_REFRESH_SECRET',
     'FILES_SIGN_SECRET',
+    // P2-13：refresh token 哈希的服务端 pepper（HMAC-SHA256），复用同一强度口径
+    'REFRESH_PEPPER',
   ]) {
     const value = requireString(key);
     if (value === undefined) continue;
@@ -157,6 +159,81 @@ export function validateEnv(env: NodeJS.ProcessEnv): void {
       env.FILES_SIGN_SECRET === env.JWT_REFRESH_SECRET)
   ) {
     errors.push('[env] FILES_SIGN_SECRET 不得与 JWT 密钥相同');
+  }
+  // P2-13：refresh pepper 一密一用，不得复用 JWT/文件签名密钥
+  if (env.REFRESH_PEPPER !== undefined) {
+    if (
+      env.REFRESH_PEPPER === env.JWT_ACCESS_SECRET ||
+      env.REFRESH_PEPPER === env.JWT_REFRESH_SECRET ||
+      env.REFRESH_PEPPER === env.FILES_SIGN_SECRET
+    ) {
+      errors.push('[env] REFRESH_PEPPER 不得与 JWT/FILES_SIGN 密钥相同');
+    }
+  }
+
+  // CORS_ORIGINS（P2-13）：逐条校验形态，仅允许 http(s)://host[:port]，不含路径；
+  // 生产环境拒绝空值、通配符 * 以及 localhost/127.0.0.1 回环来源
+  const corsRaw = env.CORS_ORIGINS;
+  if (corsRaw === undefined || corsRaw.trim() === '') {
+    if (nodeEnv === 'production') {
+      errors.push('[env] 生产环境必须显式配置非空的 CORS_ORIGINS');
+    }
+  } else {
+    const origins = corsRaw
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    for (const origin of origins) {
+      if (origin === '*') {
+        errors.push(
+          '[env] CORS_ORIGINS 不允许配置通配符 "*"（等于放行任意站点的跨域请求），请逐条列出 http(s) 来源',
+        );
+        continue;
+      }
+      if (!/^https?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?$/.test(origin)) {
+        errors.push(
+          `[env] CORS_ORIGINS 条目形态非法："${origin}"，需形如 http(s)://host[:port]，不含路径/通配符`,
+        );
+        continue;
+      }
+      if (nodeEnv === 'production') {
+        const host = origin
+          .replace(/^https?:\/\//, '')
+          .replace(/:\d+$/, '')
+          .toLowerCase();
+        if (host === 'localhost' || host === '127.0.0.1') {
+          errors.push(
+            `[env] 生产环境 CORS_ORIGINS 不得指向本机回环地址："${origin}"`,
+          );
+        }
+      }
+    }
+  }
+
+  // Swagger 文档开关（P2-13）：development 默认开启；production 必须显式
+  // ENABLE_SWAGGER=true 才挂载，且强制 Basic Auth（账号非空、密码 >=16 字节）
+  const swaggerEnabled = readBoolean(
+    env,
+    'ENABLE_SWAGGER',
+    nodeEnv !== 'production',
+  );
+  if (swaggerEnabled && nodeEnv === 'production') {
+    if (
+      env.SWAGGER_BASIC_USER === undefined ||
+      env.SWAGGER_BASIC_USER.trim() === ''
+    ) {
+      errors.push(
+        '[env] 生产环境 ENABLE_SWAGGER=true 时必须配置非空的 SWAGGER_BASIC_USER',
+      );
+    }
+    if (
+      env.SWAGGER_BASIC_PASSWORD === undefined ||
+      Buffer.byteLength(env.SWAGGER_BASIC_PASSWORD, 'utf8') < 16
+    ) {
+      errors.push(
+        '[env] 生产环境 ENABLE_SWAGGER=true 时 SWAGGER_BASIC_PASSWORD 必填且长度 >= 16 字节',
+      );
+    }
   }
 
   requireString('UPLOAD_DIR');
