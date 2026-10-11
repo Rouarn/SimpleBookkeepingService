@@ -662,6 +662,7 @@ export class BillsService {
       bookId: query.bookId,
       type: query.type && query.type !== 'ALL' ? query.type : undefined,
       categoryId: query.categoryId,
+      keyword: typeof query.keyword === 'string' ? query.keyword.trim() : undefined,
     });
   }
 
@@ -672,6 +673,7 @@ export class BillsService {
     bookId?: string;
     type?: 'expense' | 'income';
     categoryId?: string;
+    keyword?: string;
   }): { whereSql: string; params: Array<string | number> } {
     const clauses = ['b.user_id = ?'];
     const params: Array<string | number> = [options.userId];
@@ -694,6 +696,15 @@ export class BillsService {
     if (options.categoryId) {
       clauses.push('b.category_id = ?');
       params.push(options.categoryId);
+    }
+    if (options.keyword) {
+      // 转义 LIKE 通配符（\ % _），ESCape 指定反斜杠为转义符，防用户输入注入通配
+      const escaped = options.keyword
+        .replace(/\\/g, '\\\\')
+        .replace(/%/g, '\\%')
+        .replace(/_/g, '\\_');
+      clauses.push("b.remark LIKE ? ESCAPE '\\\\'");
+      params.push(`%${escaped}%`);
     }
     return { whereSql: clauses.join(' AND '), params };
   }
@@ -729,9 +740,12 @@ export class BillsService {
       'SELECT bill_id, url, sort_order FROM bill_photos WHERE bill_id = ? AND user_id = ? ORDER BY sort_order ASC, id ASC',
       [billId, userId],
     );
-    const photos = photoRows.map(
-      (photo) => this.signedUrlService.sign(photo.url).url,
-    );
+    // 详情 photos 返回 {key, url} 对象数组：key 供编辑回填保存时原样传回，
+    // url 保持签名 URL 供客户端直接展示（列表接口仍返回签名 URL 字符串数组）
+    const photos = photoRows.map((photo) => ({
+      key: photo.url,
+      url: this.signedUrlService.sign(photo.url).url,
+    }));
 
     const [monthStart, nextMonthStart] = monthRange(
       row.record_date.slice(0, 7),

@@ -22,6 +22,7 @@ import {
 import { UsersService } from './services/users.service.js';
 import { UpdateProfileDto } from './dto/update-profile.dto.js';
 import { UpdatePreferencesDto } from './dto/preferences.dto.js';
+import { ChangePasswordDto } from './dto/change-password.dto.js';
 
 @ApiTags('用户')
 @Controller('users')
@@ -41,6 +42,22 @@ export class UsersController {
     @Body() dto: UpdateProfileDto,
   ) {
     return this.usersService.updateName(userId, dto.name);
+  }
+
+  @Patch('me/password')
+  @ApiOperation({ summary: '修改密码（校验旧密码，成功后吊销全部登录态）' })
+  changePassword(
+    @CurrentUserId() userId: string,
+    @Body() dto: ChangePasswordDto,
+  ): Promise<void> {
+    return this.usersService.changePassword(userId, dto);
+  }
+
+  @Post('me/logout-all')
+  @HttpCode(200)
+  @ApiOperation({ summary: '全员登出（token_version 自增并吊销全部 refresh）' })
+  logoutAll(@CurrentUserId() userId: string): Promise<void> {
+    return this.usersService.logoutAll(userId);
   }
 
   @Post('me/avatar')

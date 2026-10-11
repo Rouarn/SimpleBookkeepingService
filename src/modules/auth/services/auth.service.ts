@@ -22,6 +22,7 @@ import { TokenService } from './token.service.js';
 
 const BCRYPT_COST = 12;
 const LOGIN_FAIL_WINDOW_MS = 15 * 60_000;
+/** 登录失败锁定阈值（P1-03）：手机号维度与 IP+手机号组合维度共用 */
 const LOGIN_FAIL_LIMIT = 5;
 /** 账号不存在时也做一次等代价 bcrypt 比较，消除响应计时差（07 §2 防枚举）。 */
 const DUMMY_PASSWORD_HASH =
@@ -108,6 +109,7 @@ export class AuthService {
         const tokenPair = await this.tokenService.issuePair(
           userEntity.id,
           device,
+          userEntity.tokenVersion ?? 0,
           manager,
         );
         return { user: userEntity, pair: tokenPair };
@@ -128,15 +130,27 @@ export class AuthService {
     return { ...pair, user: buildAuthUserVo(user, this.signedUrlService) };
   }
 
-  /** 登录：手机号维度失败计数锁定（5 次/15 分钟，40103），错误文案统一防枚举。 */
-  async login(dto: LoginDto): Promise<AuthResult> {
+  /**
+   * 登录：手机号 / IP+手机号组合双维度失败计数锁定（P1-03，各 5 次/15 分钟，40103），
+   * 错误文案统一防枚举。
+   */
+  async login(dto: LoginDto, ip: string): Promise<AuthResult> {
     const failKey = REDIS_KEYS.loginFailPhone(dto.phone);
+    // IP+手机号组合维度（P1-03）：换 IP 重试会计入各自组合计数，
+    // 组合计数达标同样锁定，防「分布式换 IP 绕过手机号计数」
+    const pairKey = REDIS_KEYS.loginFailPair(ip, dto.phone);
     // Redis 故障降级（P1-04）：锁定计数读写失败时不拒绝业务
     // （宁可不锁，不可拒业务），仅记录告警并正常走密码校验。
     let locked = false;
     try {
-      const failCount = Number((await this.redis.get(failKey)) ?? 0);
-      locked = failCount >= LOGIN_FAIL_LIMIT;
+      const [phoneCount, pairCount] = await Promise.all([
+        this.redis.get(failKey),
+        this.redis.get(pairKey),
+      ]);
+      // 双维联合判定：手机号计数或组合计数任一达标即锁
+      locked =
+        Number(phoneCount ?? 0) >= LOGIN_FAIL_LIMIT ||
+        Number(pairCount ?? 0) >= LOGIN_FAIL_LIMIT;
     } catch (error) {
       this.logger.warn(
         `登录失败计数读取失败，跳过锁定判定: ${(error as Error).message}`,
@@ -163,6 +177,10 @@ export class AuthService {
       try {
         const next = await this.redis.incr(failKey);
         if (next === 1) await this.redis.pexpire(failKey, LOGIN_FAIL_WINDOW_MS);
+        const pairNext = await this.redis.incr(pairKey);
+        if (pairNext === 1) {
+          await this.redis.pexpire(pairKey, LOGIN_FAIL_WINDOW_MS);
+        }
       } catch (error) {
         this.logger.warn(
           `登录失败计数写入失败，本次跳过计数: ${(error as Error).message}`,
@@ -183,11 +201,14 @@ export class AuthService {
       );
     }
 
-    // 登录成功清零失败计数；Redis 故障时降级为不清零（计数有 15 分钟窗口自然过期）
+    // 登录成功（P1-03）：手机号计数减半（保留原窗口 TTL）而非清零，
+    // 防「撞库一轮 → 成功 → 清零再撞」；组合计数清零。
+    // Redis 故障时降级为不清零（计数有 15 分钟窗口自然过期）。
     try {
-      await this.redis.del(failKey);
+      await this.decayPhoneFailCount(failKey);
+      await this.redis.del(pairKey);
     } catch (error) {
-      this.logger.warn(`登录失败计数清零失败: ${(error as Error).message}`);
+      this.logger.warn(`登录失败计数衰减失败: ${(error as Error).message}`);
     }
     const loginAt = new Date();
     await this.dataSource.query(
@@ -196,16 +217,33 @@ export class AuthService {
     );
     user.lastLoginAt = loginAt;
 
-    const pair = await this.tokenService.issuePair(user.id, {
-      deviceId: dto.deviceId,
-      platform: dto.platform,
-    });
+    const pair = await this.tokenService.issuePair(
+      user.id,
+      {
+        deviceId: dto.deviceId,
+        platform: dto.platform,
+      },
+      Number(user.tokenVersion ?? 0),
+    );
     return {
       ...pair,
       user: buildAuthUserVo(user, this.signedUrlService, {
         lastLoginAt: loginAt,
       }),
     };
+  }
+
+  /**
+   * 登录成功后手机号失败计数衰减（P1-03）：减半而非清零，
+   * 保留原窗口 TTL（KEEPTTL），剩余失败额度随窗口自然过期。
+   */
+  private async decayPhoneFailCount(failKey: string): Promise<void> {
+    const count = Number((await this.redis.get(failKey)) ?? 0);
+    if (count <= 1) {
+      await this.redis.del(failKey);
+      return;
+    }
+    await this.redis.set(failKey, String(Math.floor(count / 2)), 'KEEPTTL');
   }
 
   /** 刷新轮换。 */

@@ -3,7 +3,6 @@ import {
   IsIn,
   IsOptional,
   IsString,
-  Length,
   Matches,
   MaxLength,
 } from 'class-validator';
@@ -17,7 +16,8 @@ export class RegisterDto {
   phone!: string;
 
   @IsString({ message: '密码必须为字符串' })
-  @Length(8, 32, { message: '密码长度需为 8~32 位' })
+  // P1-06：长度按 Unicode 码点计（8~32 位），与弱口令校验器同口径（@Length 按 UTF-16 码元计数，emoji 等会误判）
+  @CodePointLength(8, 32, { message: '密码长度需为 8~32 位' })
   @NotWeakPassword()
   password!: string;
 

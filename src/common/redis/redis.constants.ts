@@ -6,6 +6,13 @@ export const REDIS_KEYS = {
   throttle: (name: string, key: string): string => `bk:throttle:${name}:${key}`,
   loginFailPhone: (phone: string): string => `bk:login-fail:phone:${phone}`,
   loginFailIp: (ip: string): string => `bk:login-fail:ip:${ip}`,
+  /** 登录失败锁定 IP+手机号组合维度（P1-03）：防换 IP 分布式绕过手机号计数 */
+  loginFailPair: (ip: string, phone: string): string =>
+    `bk:login-fail:pair:${ip}:${phone}`,
+  /** 用户 token_version 短缓存（P1-01）：JWT 守卫免每请求查库 */
+  tokenVersion: (userId: string): string => `bk:token-ver:${userId}`,
+  /** refresh 轮换并发幂等映射（P1-02）：旧 jti → 新令牌对 JSON，TTL 30s */
+  rtSwap: (jti: string): string => `bk:rt-swap:${jti}`,
   idempotency: (userId: string, key: string): string =>
     `bk:idem:${userId}:${key}`,
   dictCategories: (type: string): string => `bk:dict:categories:${type}`,

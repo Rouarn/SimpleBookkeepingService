@@ -3,6 +3,7 @@ import {
   readInt,
   readList,
   readString,
+  readBoolean,
 } from './env.validation.js';
 
 /**
@@ -25,12 +26,18 @@ export interface AppConfig {
     password: string;
     name: string;
     connectionLimit: number;
+    /** 是否启用 MySQL TLS 加密连接（DB_TLS，默认 false，生产建议开启） */
+    tls: boolean;
+    /** MySQL TLS 证书校验开关（DB_TLS_REJECT_UNAUTHORIZED，默认 true；5.7 自签证书场景可关闭） */
+    tlsRejectUnauthorized: boolean;
   };
   redis: {
     host: string;
     port: number;
     password: string;
     db: number;
+    /** 是否启用 Redis TLS 加密连接（REDIS_TLS，默认 false，生产建议开启） */
+    tls: boolean;
   };
   jwt: {
     accessSecret: string;
@@ -39,6 +46,10 @@ export interface AppConfig {
     refreshTtl: string;
     accessTtlSeconds: number;
     refreshTtlSeconds: number;
+    /** JWT 标准声明 iss：签发方标识（P1-05，防跨系统令牌混用） */
+    issuer: string;
+    /** JWT 标准声明 aud：目标受众标识（P1-05） */
+    audience: string;
   };
   uploads: {
     dir: string;
@@ -72,7 +83,8 @@ export default (): AppConfig => {
 
   const nodeEnv = (process.env.NODE_ENV ??
     'development') as AppConfig['app']['nodeEnv'];
-  const accessTtl = readString(process.env, 'JWT_ACCESS_TTL', '2h');
+  // access token 默认 30m（P1-01）：配合 token_version 体系缩短失陷窗口
+  const accessTtl = readString(process.env, 'JWT_ACCESS_TTL', '30m');
   const refreshTtl = readString(process.env, 'JWT_REFRESH_TTL', '30d');
 
   return {
@@ -90,12 +102,19 @@ export default (): AppConfig => {
       password: process.env.DB_PASSWORD ?? '',
       name: readString(process.env, 'DB_NAME'),
       connectionLimit: readInt(process.env, 'DB_CONNECTION_LIMIT', 10, 1, 100),
+      tls: readBoolean(process.env, 'DB_TLS', false),
+      tlsRejectUnauthorized: readBoolean(
+        process.env,
+        'DB_TLS_REJECT_UNAUTHORIZED',
+        true,
+      ),
     },
     redis: {
       host: readString(process.env, 'REDIS_HOST'),
       port: readInt(process.env, 'REDIS_PORT', 6379, 1, 65535),
       password: process.env.REDIS_PASSWORD ?? '',
       db: readInt(process.env, 'REDIS_DB', 0, 0, 15),
+      tls: readBoolean(process.env, 'REDIS_TLS', false),
     },
     jwt: {
       accessSecret: readString(process.env, 'JWT_ACCESS_SECRET'),
@@ -104,6 +123,8 @@ export default (): AppConfig => {
       refreshTtl,
       accessTtlSeconds: parseTtlSeconds(accessTtl),
       refreshTtlSeconds: parseTtlSeconds(refreshTtl),
+      issuer: 'simple-bookkeeping',
+      audience: 'xiaolv-app',
     },
     uploads: {
       dir: readString(process.env, 'UPLOAD_DIR', './uploads'),

@@ -47,6 +47,8 @@ lerna-debug.log*
 .env.local
 .env.development
 .env.production
+# 密钥轮换脚本产生的带时间戳备份（含旧密钥，禁止入库）
+.env.production.bak.*
 
 # uploaded files (keep directory structure, ignore runtime content)
 /uploads/bills/*

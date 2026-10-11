@@ -1,17 +1,20 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import bcrypt from 'bcrypt';
 import type { Express } from 'express';
 import { BusinessException } from '../../../common/exceptions/business.exception.js';
 import { ERROR_CODES } from '../../../common/exceptions/error-codes.js';
 import { joinDaysOf } from '../../../common/utils/date.util.js';
 import { codePointLength } from '../../../common/utils/text.util.js';
+import { TokenService } from '../../auth/services/token.service.js';
 import { CategoriesService } from '../../dictionaries/services/categories.service.js';
 import { PayMethodsService } from '../../dictionaries/services/pay-methods.service.js';
 import { BooksService } from '../../books/services/books.service.js';
 import { SignedUrlService } from '../../files/services/signed-url.service.js';
 import { StorageService } from '../../files/services/storage.service.js';
 import { CleanupService } from '../../files/services/cleanup.service.js';
+import type { ChangePasswordDto } from '../dto/change-password.dto.js';
 import type { UpdatePreferencesDto } from '../dto/preferences.dto.js';
 import {
   toPreferencesVo,
@@ -26,11 +29,15 @@ interface CountRow {
   cnt: string | number;
 }
 
+/** 与注册一致（auth.service BCRYPT_COST）：bcrypt 计算成本因子 */
+const BCRYPT_COST = 12;
+
 /** 用户资料 / 头像 / 统计 / UI 偏好（04a §5~§10）。 */
 @Injectable()
 export class UsersService {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly tokenService: TokenService,
     private readonly booksService: BooksService,
     private readonly categoriesService: CategoriesService,
     private readonly payMethodsService: PayMethodsService,
@@ -102,6 +109,51 @@ export class UsersService {
 
     const signed = this.signedUrlService.sign(saved.key);
     return { avatar: signed.url, expiresAt: signed.expiresAt };
+  }
+
+  /**
+   * 修改密码（P1-01）：校验旧密码 → 单事务更新哈希 + token_version 自增 +
+   * 吊销该用户全部 refresh → 清守卫版本短缓存，所有旧 access 即刻失效。
+   */
+  async changePassword(userId: string, dto: ChangePasswordDto): Promise<void> {
+    const rows = await this.dataSource.query<
+      Array<{ id: string; password_hash: string }>
+    >('SELECT id, password_hash FROM users WHERE id = ? LIMIT 1', [userId]);
+    const user = rows[0];
+    if (!user) {
+      throw new BusinessException(
+        ERROR_CODES.UNAUTHORIZED.code,
+        ERROR_CODES.UNAUTHORIZED.httpStatus,
+        ERROR_CODES.UNAUTHORIZED.message,
+      );
+    }
+    const matched = await bcrypt.compare(dto.oldPassword, user.password_hash);
+    if (!matched) {
+      throw new BusinessException(
+        ERROR_CODES.PASSWORD_INCORRECT.code,
+        ERROR_CODES.PASSWORD_INCORRECT.httpStatus,
+        ERROR_CODES.PASSWORD_INCORRECT.message,
+        { field: 'oldPassword' },
+      );
+    }
+    const newPasswordHash = await bcrypt.hash(dto.newPassword, BCRYPT_COST);
+    await this.dataSource.transaction(async (manager) => {
+      await manager.query(
+        'UPDATE users SET password_hash = ?, token_version = token_version + 1 WHERE id = ?',
+        [newPasswordHash, userId],
+      );
+      await this.tokenService.revokeAllRefreshTokens(userId, manager);
+    });
+    await this.tokenService.invalidateVersionCache(userId);
+  }
+
+  /** 全员登出（P1-01）：token_version 自增 + 吊销全部 refresh，旧 access 即刻失效。 */
+  async logoutAll(userId: string): Promise<void> {
+    await this.dataSource.transaction(async (manager) => {
+      await this.tokenService.bumpTokenVersion(userId, manager);
+      await this.tokenService.revokeAllRefreshTokens(userId, manager);
+    });
+    await this.tokenService.invalidateVersionCache(userId);
   }
 
   async getStats(userId: string): Promise<{

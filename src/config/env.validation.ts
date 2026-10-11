@@ -50,6 +50,37 @@ export function readList(
     .filter(Boolean);
 }
 
+/** 读取布尔环境变量：true/1/yes/on（不区分大小写）为真，其余视为假（P1-05）。 */
+export function readBoolean(
+  env: NodeJS.ProcessEnv,
+  key: string,
+  defaultValue: boolean,
+): boolean {
+  const raw = env[key];
+  if (raw === undefined || raw === '') return defaultValue;
+  return ['true', '1', 'yes', 'on'].includes(raw.trim().toLowerCase());
+}
+
+/** 常见弱密钥片段（P1-05）：密钥中包含任一片段即拒绝（不区分大小写）。 */
+const WEAK_SECRET_PATTERNS = [
+  'change-me',
+  'changeme',
+  'secret',
+  'example',
+  'password',
+  '123456',
+] as const;
+
+/** 统计字符类别数：小写字母 / 大写字母 / 数字 / 其他符号，共 4 类。 */
+function countCharKinds(value: string): number {
+  let kinds = 0;
+  if (/[a-z]/.test(value)) kinds += 1;
+  if (/[A-Z]/.test(value)) kinds += 1;
+  if (/\d/.test(value)) kinds += 1;
+  if (/[^a-zA-Z0-9]/.test(value)) kinds += 1;
+  return kinds;
+}
+
 /**
  * 校验并返回归一化后的环境变量集合。
  * 任何错误聚合成一条异常信息，保证启动失败原因可一次看全。
@@ -79,17 +110,37 @@ export function validateEnv(env: NodeJS.ProcessEnv): void {
 
   // Redis
   requireString('REDIS_HOST');
+  // P1-05：生产环境 Redis 必须设置密码，缺失即启动失败
+  if (
+    nodeEnv === 'production' &&
+    (env.REDIS_PASSWORD === undefined || env.REDIS_PASSWORD.trim() === '')
+  ) {
+    errors.push('[env] 生产环境必须设置非空的 REDIS_PASSWORD');
+  }
 
-  // JWT：密钥 >=32 字节
+  // JWT/文件签名密钥：长度 >=32 字节 + 弱密钥片段与熵检测（P1-05）
   for (const key of [
     'JWT_ACCESS_SECRET',
     'JWT_REFRESH_SECRET',
     'FILES_SIGN_SECRET',
   ]) {
     const value = requireString(key);
-    if (value !== undefined && Buffer.byteLength(value, 'utf8') < 32) {
+    if (value === undefined) continue;
+    if (Buffer.byteLength(value, 'utf8') < 32) {
       errors.push(
         `[env] ${key} 长度必须 >= 32 字节（当前 ${Buffer.byteLength(value, 'utf8')} 字节）`,
+      );
+    }
+    const lower = value.toLowerCase();
+    const hit = WEAK_SECRET_PATTERNS.find((pattern) => lower.includes(pattern));
+    if (hit !== undefined) {
+      errors.push(
+        `[env] ${key} 包含常见弱密钥片段 "${hit}"，请更换为随机生成的强密钥（如 openssl rand -base64 48）`,
+      );
+    }
+    if (countCharKinds(value) < 3) {
+      errors.push(
+        `[env] ${key} 字符种类不足 3 类（需在小写字母/大写字母/数字/符号中至少占 3 类），疑似弱密钥，请更换为随机生成的强密钥`,
       );
     }
   }

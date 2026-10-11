@@ -33,6 +33,13 @@ export class User {
   @Column({ type: 'tinyint', unsigned: true, default: 1 })
   status: number;
 
+  /**
+   * 令牌版本号（P1-01）：签发 access JWT 时写入 ver 声明，JWT 守卫比对校验。
+   * 修改密码 / 全员登出时自增，使既有 access token 全部失效。
+   */
+  @Column({ type: 'int', unsigned: true, name: 'token_version', default: 0 })
+  tokenVersion: number;
+
   @Column({
     type: 'datetime',
     precision: 3,

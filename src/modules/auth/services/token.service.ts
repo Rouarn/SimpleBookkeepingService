@@ -9,9 +9,14 @@ import type { AppConfig } from '../../../config/configuration.js';
 import { BusinessException } from '../../../common/exceptions/business.exception.js';
 import { ERROR_CODES } from '../../../common/exceptions/error-codes.js';
 import { CronLockService } from '../../../common/cron/cron-lock.service.js';
+import { RedisCacheService } from '../../../common/redis/redis-cache.service.js';
+import { REDIS_KEYS } from '../../../common/redis/redis.constants.js';
 
 /** 选主锁 TTL 兜底（P1-20）：按任务预估时长 10 分钟 */
 const PURGE_LOCK_TTL_SECONDS = 10 * 60;
+
+/** refresh 轮换幂等映射 TTL（P1-02）：覆盖客户端并发重试窗口，过期后映射消失 */
+const RT_SWAP_TTL_SECONDS = 30;
 
 export interface TokenDeviceInfo {
   deviceId?: string;
@@ -54,9 +59,10 @@ function invalidRefresh(): never {
 
 /**
  * 双令牌服务（07 §3）：
- * - access JWT（2h）无状态，载荷 sub/jti/iat/exp/type；
+ * - access JWT（默认 30m）无状态，载荷 sub/jti/iat/exp/type/ver（P1-01 token 版本）；
  * - refresh JWT（30d）仅以 SHA256 形态入库；
- * - 刷新即轮换；已吊销令牌再次出现 → 吊销该用户全部 refresh（疑似泄漏）。
+ * - 刷新即轮换；已吊销令牌再次出现 → 吊销该用户全部 refresh（疑似泄漏）；
+ * - 并发轮换竞争走幂等映射（P1-02），良性并发不再连坐吊销。
  */
 @Injectable()
 export class TokenService {
@@ -68,25 +74,37 @@ export class TokenService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly cronLock: CronLockService,
+    private readonly cache: RedisCacheService,
   ) {
     this.jwtConfig = this.configService.get<AppConfig['jwt']>('jwt')!;
   }
 
-  /** 签发一对新令牌并把 refresh 哈希入库；可在事务内（manager）执行。 */
+  /**
+   * 签发一对新令牌并把 refresh 哈希入库；可在事务内（manager）执行。
+   * access 载荷带 ver（用户 token_version，P1-01），并写入 iss/aud（P1-05）。
+   */
   async issuePair(
     userId: string,
     device: TokenDeviceInfo,
+    tokenVersion: number,
     manager?: EntityManager,
   ): Promise<TokenPair> {
     const accessJti = randomUUID();
     const refreshJti = randomUUID();
 
     const accessToken = this.jwtService.sign(
-      { sub: String(userId), jti: accessJti, type: 'access' },
+      {
+        sub: String(userId),
+        jti: accessJti,
+        type: 'access',
+        ver: tokenVersion,
+      },
       {
         secret: this.jwtConfig.accessSecret,
         expiresIn: this.jwtConfig.accessTtlSeconds,
         algorithm: 'HS256',
+        issuer: this.jwtConfig.issuer,
+        audience: this.jwtConfig.audience,
       },
     );
     const refreshToken = this.jwtService.sign(
@@ -95,6 +113,8 @@ export class TokenService {
         secret: this.jwtConfig.refreshSecret,
         expiresIn: this.jwtConfig.refreshTtlSeconds,
         algorithm: 'HS256',
+        issuer: this.jwtConfig.issuer,
+        audience: this.jwtConfig.audience,
       },
     );
 
@@ -123,7 +143,9 @@ export class TokenService {
   /**
    * 刷新轮换：校验 JWT → 查库存 → 吊销旧令牌并签发新对。
    * 任何不一致（无效/过期/哈希不符/已吊销）一律 40102；
-   * 已吊销令牌被重用时吊销该用户全部有效 refresh。
+   * 已吊销令牌被重用时吊销该用户全部有效 refresh；
+   * 并发轮换竞争（P1-02）：先查幂等映射，命中则返回同一新令牌对，
+   * 未命中（真窗口外重放）才全家族吊销并记安全日志。
    */
   async rotate(rawRefreshToken: string): Promise<TokenPair> {
     const payload = this.verifyRefreshJwt(rawRefreshToken);
@@ -154,9 +176,9 @@ export class TokenService {
 
     if (stored.revoked_at !== null || stored.token_hash !== tokenHash) {
       // 重用检测：作废该用户当前全部有效 refresh token
-      await this.dataSource.query(
-        'UPDATE refresh_tokens SET revoked_at = NOW(3) WHERE user_id = ? AND revoked_at IS NULL',
-        [String(payload.sub)],
+      await this.revokeAllRefreshTokens(String(payload.sub));
+      this.logger.warn(
+        `检测到 refresh token 重用，已吊销该用户全部 refresh：userId=${String(payload.sub)}，旧 jti 摘要=${this.digestJti(payload.jti)}`,
       );
       invalidRefresh();
     }
@@ -174,14 +196,32 @@ export class TokenService {
         [stored.id],
       );
       if ((result as { affectedRows?: number }).affectedRows !== 1) {
-        // 并发刷新竞争：另一请求已轮换，本次按重用处理
-        await this.dataSource.query(
-          'UPDATE refresh_tokens SET revoked_at = COALESCE(revoked_at, NOW(3)) WHERE user_id = ? AND revoked_at IS NULL',
-          [String(payload.sub)],
+        // 并发刷新竞争（P1-02）：幂等映射命中则直接返回映射中的新令牌对
+        // （不吊销、不报错）；未命中视为窗口外重放，回退全家族吊销。
+        // 注意吊销须走非事务连接：下方抛错会回滚 manager 内的变更。
+        const swapped = await this.swapCacheGet(payload.jti);
+        if (swapped) return swapped;
+        await this.revokeAllRefreshTokens(String(payload.sub));
+        this.logger.warn(
+          `refresh 轮换竞争且幂等映射未命中（疑似重放），已吊销该用户全部 refresh：userId=${String(payload.sub)}，旧 jti 摘要=${this.digestJti(payload.jti)}`,
         );
         invalidRefresh();
       }
-      return this.issuePair(String(payload.sub), device, manager);
+      // 事务内读最新 token_version：改密并发时新令牌携带的 ver 尽量新鲜
+      const tokenVersion = await this.readTokenVersion(
+        manager,
+        String(payload.sub),
+      );
+      const pair = await this.issuePair(
+        String(payload.sub),
+        device,
+        tokenVersion,
+        manager,
+      );
+      // 轮换成功后登记幂等映射（P1-02）：映射须在事务提交前写入，
+      // 否则并发请求会在「已提交、映射未写」的间隙误判为重放
+      await this.swapCachePut(payload.jti, pair);
+      return pair;
     });
   }
 
@@ -231,12 +271,47 @@ export class TokenService {
     );
   }
 
+  /** P1-01：吊销该用户全部 refresh token（改密/全员登出/重用处置共用）。 */
+  async revokeAllRefreshTokens(
+    userId: string,
+    manager?: EntityManager,
+  ): Promise<void> {
+    const executor = manager ?? this.dataSource;
+    await executor.query(
+      'UPDATE refresh_tokens SET revoked_at = NOW(3) WHERE user_id = ? AND revoked_at IS NULL',
+      [userId],
+    );
+  }
+
+  /**
+   * P1-01：token_version 自增并返回新版本号（改密/全员登出后旧 access 即刻失效）。
+   * 调用方随后应执行 invalidateVersionCache 清守卫侧短缓存。
+   */
+  async bumpTokenVersion(
+    userId: string,
+    manager?: EntityManager,
+  ): Promise<number> {
+    const executor = manager ?? this.dataSource;
+    await executor.query(
+      'UPDATE users SET token_version = token_version + 1 WHERE id = ?',
+      [userId],
+    );
+    return this.readTokenVersion(executor, userId);
+  }
+
+  /** P1-01：失效 token_version 短缓存，让版本变更对守卫立即可见（TTL 兜底）。 */
+  async invalidateVersionCache(userId: string): Promise<void> {
+    await this.cache.invalidateKeys(REDIS_KEYS.tokenVersion(userId));
+  }
+
   private verifyRefreshJwt(token: string): RefreshJwtPayload {
     let payload: RefreshJwtPayload;
     try {
       payload = this.jwtService.verify<RefreshJwtPayload>(token, {
         secret: this.jwtConfig.refreshSecret,
         algorithms: ['HS256'],
+        issuer: this.jwtConfig.issuer,
+        audience: this.jwtConfig.audience,
       });
     } catch {
       invalidRefresh();
@@ -249,5 +324,31 @@ export class TokenService {
 
   private hashToken(token: string): string {
     return createHash('sha256').update(token).digest('hex');
+  }
+
+  /** 读取用户 token_version（签发 access JWT 的 ver 声明用）。 */
+  private async readTokenVersion(
+    executor: DataSource | EntityManager,
+    userId: string,
+  ): Promise<number> {
+    const rows = await executor.query<
+      Array<{ token_version: number | string }>
+    >('SELECT token_version FROM users WHERE id = ? LIMIT 1', [userId]);
+    return Number(rows[0]?.token_version ?? 0);
+  }
+
+  /** 读轮换幂等映射（P1-02）：Redis 异常/未命中均返回 null，回退现行全家族吊销。 */
+  private async swapCacheGet(oldJti: string): Promise<TokenPair | null> {
+    return this.cache.get<TokenPair>(REDIS_KEYS.rtSwap(oldJti));
+  }
+
+  /** 写轮换幂等映射（P1-02）：写失败不阻断轮换主流程（退化为现行连坐行为）。 */
+  private async swapCachePut(oldJti: string, pair: TokenPair): Promise<void> {
+    await this.cache.set(REDIS_KEYS.rtSwap(oldJti), pair, RT_SWAP_TTL_SECONDS);
+  }
+
+  /** jti 摘要（安全日志用）：只落 SHA256 前 12 位，不落完整令牌。 */
+  private digestJti(jti: string): string {
+    return createHash('sha256').update(jti).digest('hex').slice(0, 12);
   }
 }

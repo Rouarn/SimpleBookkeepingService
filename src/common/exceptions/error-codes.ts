@@ -49,6 +49,11 @@ export const ERROR_CODES = {
     httpStatus: HttpStatus.BAD_REQUEST,
     message: '预算不能为负',
   },
+  PASSWORD_INCORRECT: {
+    code: 40012,
+    httpStatus: HttpStatus.BAD_REQUEST,
+    message: '旧密码不正确',
+  },
 
   BOOK_NOT_EMPTY: {
     code: 40020,

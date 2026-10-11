@@ -3,6 +3,7 @@ import {
   IsIn,
   IsOptional,
   IsString,
+  Length,
   Matches,
   Validate,
 } from 'class-validator';
@@ -41,6 +42,12 @@ export class BillListQueryDto extends PaginationQueryDto {
   @Matches(ID_PATTERN, { message: '分类 id 非法' })
   @IsOptional()
   categoryId?: string;
+
+  /** 备注模糊搜索关键字（1~50 字，%/_/\ 由服务层转义） */
+  @Length(1, 50, { message: '搜索关键字需 1~50 字' })
+  @IsString()
+  @IsOptional()
+  keyword?: string;
 }
 
 /** 今日流水/月汇总/分组通用：仅账本过滤 */

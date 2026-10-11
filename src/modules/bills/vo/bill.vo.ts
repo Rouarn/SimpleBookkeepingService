@@ -27,6 +27,12 @@ export interface BillJoinRow {
   updated_at?: Date | string;
 }
 
+/** 凭证照片视图项：key 为存储 key（编辑回填保存时传回），url 为签名 URL（展示用）。 */
+export interface BillPhotoVm {
+  key: string;
+  url: string;
+}
+
 export interface BillVm {
   id: string;
   type: 'expense' | 'income';
@@ -46,7 +52,9 @@ export interface BillVm {
   bookId: string;
 }
 
-export interface BillDetailVm extends BillVm {
+/** 详情在列表字段基础上把 photos 扩展为 {key, url} 对象数组。 */
+export interface BillDetailVm extends Omit<BillVm, 'photos'> {
+  photos: BillPhotoVm[];
   bookName: string;
   recorder: string;
   recordTime: string;
@@ -55,7 +63,10 @@ export interface BillDetailVm extends BillVm {
   updatedAt: string;
 }
 
-function baseVm(row: BillJoinRow, photos: string[]): BillVm {
+function baseVm<P extends string[] | BillPhotoVm[]>(
+  row: BillJoinRow,
+  photos: P,
+): Omit<BillVm, 'photos'> & { photos: P } {
   const abs = round2(row.amount);
   return {
     id: String(row.id),
@@ -101,7 +112,7 @@ export function toBillVm(
 
 export function toBillDetailVm(
   row: BillJoinRow,
-  photos: string[],
+  photos: BillPhotoVm[],
   monthExpense: number,
 ): BillDetailVm {
   return {

@@ -29,6 +29,11 @@ import { OperationLog } from '../entities/operation-log.entity.js';
       useFactory: (configService: ConfigService) => {
         const appConfig = configService.get<AppConfig['app']>('app')!;
         const dbConfig = configService.get<AppConfig['database']>('database')!;
+        // P1-05：DB_TLS=true 时启用 TLS 加密连接；MySQL 5.7 自签证书且
+        // 无法导入 CA 的场景，可通过 DB_TLS_REJECT_UNAUTHORIZED=false 跳过证书校验
+        const ssl = dbConfig.tls
+          ? { rejectUnauthorized: dbConfig.tlsRejectUnauthorized }
+          : undefined;
         return {
           type: 'mysql' as const,
           host: dbConfig.host,
@@ -38,6 +43,7 @@ import { OperationLog } from '../entities/operation-log.entity.js';
           database: dbConfig.name,
           charset: 'utf8mb4',
           timezone: '+08:00',
+          ssl,
           entities: [
             User,
             RefreshToken,

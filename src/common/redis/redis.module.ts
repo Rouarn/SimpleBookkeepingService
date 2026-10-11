@@ -28,6 +28,8 @@ import { RedisCacheService } from './redis-cache.service.js';
           port: redisConfig.port,
           password: redisConfig.password || undefined,
           db: redisConfig.db,
+          // P1-05：REDIS_TLS=true 时启用 TLS 加密连接（生产建议开启）
+          tls: redisConfig.tls ? {} : undefined,
           lazyConnect: false,
           maxRetriesPerRequest: 3,
           // 离线队列禁用（P1-04）：Redis 断连时命令立即快速失败而非排队悬挂，
