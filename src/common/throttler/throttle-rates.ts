@@ -9,6 +9,7 @@ export const THROTTLE_NAMES = {
   BILL_WRITE: 'bill-write',
   BILL_DELETE: 'bill-delete',
   UPLOAD: 'upload',
+  EXPORT: 'export',
 } as const;
 
 export const THROTTLE_RATES = {
@@ -26,4 +27,6 @@ export const THROTTLE_RATES = {
   [THROTTLE_NAMES.BILL_DELETE]: { ttl: 60_000, limit: 20 },
   /** 图片上传 20 次/10 分钟（42901） */
   [THROTTLE_NAMES.UPLOAD]: { ttl: 10 * 60_000, limit: 20 },
+  /** 账单数据导出 6 次/小时（CSV 全量流式，防高频大查询） */
+  [THROTTLE_NAMES.EXPORT]: { ttl: 60 * 60_000, limit: 6 },
 } as const;

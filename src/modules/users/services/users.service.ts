@@ -1,16 +1,22 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import bcrypt from 'bcrypt';
 import type { Express } from 'express';
+import type { Response } from 'express';
 import { BusinessException } from '../../../common/exceptions/business.exception.js';
 import { ERROR_CODES } from '../../../common/exceptions/error-codes.js';
-import { joinDaysOf } from '../../../common/utils/date.util.js';
+import {
+  formatTimestamp,
+  joinDaysOf,
+  monthRange,
+} from '../../../common/utils/date.util.js';
 import { codePointLength } from '../../../common/utils/text.util.js';
 import { TokenService } from '../../auth/services/token.service.js';
 import { CategoriesService } from '../../dictionaries/services/categories.service.js';
 import { PayMethodsService } from '../../dictionaries/services/pay-methods.service.js';
 import { BooksService } from '../../books/services/books.service.js';
+import { MessagesService } from '../../messages/messages.service.js';
 import { SignedUrlService } from '../../files/services/signed-url.service.js';
 import { StorageService } from '../../files/services/storage.service.js';
 import { CleanupService } from '../../files/services/cleanup.service.js';
@@ -38,9 +44,34 @@ interface BillStatsRow {
 /** 与注册一致（auth.service BCRYPT_COST）：bcrypt 计算成本因子 */
 const BCRYPT_COST = 12;
 
+/** CSV 导出主键游标分批行数 */
+const EXPORT_BATCH_SIZE = 1000;
+
+/** CSV 字段转义：含 , " \n \r 时双引号包裹并翻倍内部引号。 */
+function csvEscape(field: string): string {
+  if (/[",\n\r]/.test(field)) {
+    return `"${field.replace(/"/g, '""')}"`;
+  }
+  return field;
+}
+
+interface ExportBillRow {
+  id: string | number;
+  record_date: string;
+  record_time: string;
+  type: 'expense' | 'income';
+  category_name: string;
+  pay_method_name: string;
+  amount: string;
+  remark: string | null;
+  book_name: string;
+}
+
 /** 用户资料 / 头像 / 统计 / UI 偏好（04a §5~§10）。 */
 @Injectable()
 export class UsersService {
+  private readonly logger = new Logger('UsersService');
+
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly tokenService: TokenService,
@@ -50,6 +81,7 @@ export class UsersService {
     private readonly signedUrlService: SignedUrlService,
     private readonly storageService: StorageService,
     private readonly cleanupService: CleanupService,
+    private readonly messagesService: MessagesService,
   ) {}
 
   async getProfile(userId: string): Promise<ProfileVo> {
@@ -160,6 +192,143 @@ export class UsersService {
       await this.tokenService.revokeAllRefreshTokens(userId, manager);
     });
     await this.tokenService.invalidateVersionCache(userId);
+  }
+
+  /**
+   * 账单 CSV 导出（流式）：@Res() 接管响应，主键游标 1000 行/批分批查询
+   * 并写响应流，避免全量结果集驻留内存；JOIN 分类/支付方式/账本名。
+   * 仅导出本人数据（恒定 user_id 过滤）；month 缺省导出全部。
+   */
+  async exportBills(
+    userId: string,
+    month: string | undefined,
+    res: Response,
+  ): Promise<void> {
+    const clauses = ['b.user_id = ?'];
+    const params: Array<string | number> = [userId];
+    if (month) {
+      const [monthStart, monthEnd] = monthRange(month);
+      clauses.push('b.record_date >= ?', 'b.record_date < ?');
+      params.push(monthStart, monthEnd);
+    }
+    const whereSql = clauses.join(' AND ');
+    // Excel 中文兼容：BOM + UTF-8；文件名带月份（YYYYMM）或 all
+    const filename = month
+      ? `bills_export_${month.replace('-', '')}.csv`
+      : 'bills_export_all.csv';
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
+    res.write('\uFEFF');
+    res.write('账单日期,时间,类型,分类,支付方式,金额,备注,账本\n');
+
+    try {
+      let cursor = '0';
+      for (;;) {
+        const rows = await this.dataSource.query<ExportBillRow[]>(
+          `SELECT b.id,
+                  DATE_FORMAT(b.record_date, '%Y-%m-%d') AS record_date,
+                  b.record_time, b.type,
+                  c.name AS category_name, p.name AS pay_method_name,
+                  b.amount, b.remark, bk.name AS book_name
+             FROM bills b
+             JOIN categories c ON c.id = b.category_id
+             JOIN pay_methods p ON p.id = b.pay_method_id
+             JOIN books bk ON bk.id = b.book_id
+            WHERE ${whereSql} AND b.id > ?
+            ORDER BY b.id ASC
+            LIMIT ${EXPORT_BATCH_SIZE}`,
+          [...params, cursor],
+        );
+        if (rows.length === 0) break;
+        for (const row of rows) {
+          res.write(
+            [
+              row.record_date,
+              String(row.record_time).slice(0, 5),
+              row.type === 'expense' ? '支出' : '收入',
+              row.category_name,
+              row.pay_method_name,
+              // 金额保持 DECIMAL 字符串原样，不经数值转换
+              String(row.amount),
+              row.remark ?? '',
+              row.book_name,
+            ]
+              .map(csvEscape)
+              .join(',') + '\n',
+          );
+        }
+        cursor = String(rows[rows.length - 1]!.id);
+        if (rows.length < EXPORT_BATCH_SIZE) break;
+      }
+    } catch (error) {
+      this.logger.warn(
+        `账单导出中断 userId=${userId}: ${(error as Error).message}`,
+      );
+    } finally {
+      if (!res.writableEnded) res.end();
+    }
+  }
+
+  /**
+   * 账号注销：校验密码 → 单事务改写账号（status=2、手机号匿名化释放唯一键、
+   * token_version 自增、记录注销时刻）→ 事务后吊销全部 refresh → 清守卫
+   * 版本缓存 → 发一条 security 告警消息（留档，用户已登出看不到无妨）。
+   * 业务数据由注销保留期清理任务（deactivated-purge）回收；users 行保留。
+   */
+  async deactivate(userId: string, password: string): Promise<void> {
+    const rows = await this.dataSource.query<
+      Array<{ id: string; password_hash: string }>
+    >('SELECT id, password_hash FROM users WHERE id = ? LIMIT 1', [userId]);
+    const user = rows[0];
+    if (!user) {
+      throw new BusinessException(
+        ERROR_CODES.UNAUTHORIZED.code,
+        ERROR_CODES.UNAUTHORIZED.httpStatus,
+        ERROR_CODES.UNAUTHORIZED.message,
+      );
+    }
+    // 与改密同一错误码路径：密码不符 → PASSWORD_INCORRECT
+    const matched = await bcrypt.compare(password, user.password_hash);
+    if (!matched) {
+      throw new BusinessException(
+        ERROR_CODES.PASSWORD_INCORRECT.code,
+        ERROR_CODES.PASSWORD_INCORRECT.httpStatus,
+        ERROR_CODES.PASSWORD_INCORRECT.message,
+        { field: 'password' },
+      );
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      // 匿名手机号内嵌主键 id（id 唯一故新值必然唯一，MD5 段仅混淆），无碰撞重试需要
+      const result = await manager.query(
+        `UPDATE users SET
+           status = 2,
+           phone = CONCAT('del:', id, ':', LEFT(MD5(RAND()), 10)),
+           nickname = '已注销用户',
+           avatar_url = '',
+           token_version = token_version + 1,
+           deactivated_at = NOW(3)
+         WHERE id = ? AND status = 1`,
+        [userId],
+      );
+      if ((result as { affectedRows?: number }).affectedRows !== 1) {
+        throw new BusinessException(
+          ERROR_CODES.CONFLICT.code,
+          ERROR_CODES.CONFLICT.httpStatus,
+          '账号状态已变化，请刷新后重试',
+        );
+      }
+    });
+
+    // 事务后收尾（事务外连接）：吊销全部 refresh + 清守卫版本短缓存
+    await this.tokenService.revokeAllRefreshTokens(userId);
+    await this.tokenService.invalidateVersionCache(userId);
+    await this.messagesService.append(
+      userId,
+      'security',
+      '安全提醒',
+      `账号已于 ${formatTimestamp()} 申请注销，全部登录态已失效；账单等业务数据将在保留期后清除。`,
+    );
   }
 
   async getStats(userId: string): Promise<{

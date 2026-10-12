@@ -14,6 +14,10 @@ import { REDIS_CLIENT } from './redis/redis.constants.js';
 import { RedisThrottlerStorage } from './throttler/redis-throttler.storage.js';
 import { CronLockService } from './cron/cron-lock.service.js';
 import { AuditCleanupService } from './cron/audit-cleanup.service.js';
+import { MonthlyReportCronService } from './cron/monthly-report.cron.service.js';
+import { DeactivatedPurgeCronService } from './cron/deactivated-purge.cron.service.js';
+import { MessagesModule } from '../modules/messages/messages.module.js';
+import { FilesModule } from '../modules/files/files.module.js';
 import { THROTTLE_NAMES, THROTTLE_RATES } from './throttler/throttle-rates.js';
 import { CustomThrottlerGuard } from './throttler/custom-throttler.guard.js';
 import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
@@ -31,6 +35,9 @@ import type { AppConfig } from '../config/configuration.js';
 @Module({
   imports: [
     RedisModule,
+    // cron 服务依赖：月报/注销清理需要 MessagesService，注销清理需要 StorageService
+    MessagesModule,
+    FilesModule,
     ThrottlerModule.forRootAsync({
       imports: [RedisModule],
       inject: [REDIS_CLIENT],
@@ -70,6 +77,7 @@ import type { AppConfig } from '../config/configuration.js';
             build(THROTTLE_NAMES.BILL_WRITE),
             build(THROTTLE_NAMES.BILL_DELETE),
             build(THROTTLE_NAMES.UPLOAD),
+            build(THROTTLE_NAMES.EXPORT),
           ],
         };
       },
@@ -90,6 +98,8 @@ import type { AppConfig } from '../config/configuration.js';
     RedisThrottlerStorage,
     CronLockService,
     AuditCleanupService,
+    MonthlyReportCronService,
+    DeactivatedPurgeCronService,
     AllExceptionsFilter,
     LoggingInterceptor,
     TransformInterceptor,

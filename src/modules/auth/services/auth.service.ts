@@ -246,9 +246,9 @@ export class AuthService {
     await this.redis.set(failKey, String(Math.floor(count / 2)), 'KEEPTTL');
   }
 
-  /** 刷新轮换。 */
-  async refresh(rawRefreshToken: string): Promise<TokenPair> {
-    return this.tokenService.rotate(rawRefreshToken);
+  /** 刷新轮换（ip 透传给重放安全告警消息）。 */
+  async refresh(rawRefreshToken: string, ip = ''): Promise<TokenPair> {
+    return this.tokenService.rotate(rawRefreshToken, ip);
   }
 
   /** 登出：吊销携带的 refresh token（access 短期无状态，客户端丢弃即可）。 */

@@ -70,6 +70,10 @@ export interface AppConfig {
     billMaxEdge: number;
     avatarMaxEdge: number;
   };
+  /** 账号注销：业务数据保留期（天），期满由每日清理任务回收 */
+  userDeactivation: {
+    retentionDays: number;
+  };
 }
 
 /** 简单时长解析：支持 `12h`、`30d`、`2h`、`43200`(秒)、`90m`。 */
@@ -171,6 +175,15 @@ export default (): AppConfig => {
         512,
         64,
         4096,
+      ),
+    },
+    userDeactivation: {
+      retentionDays: readInt(
+        process.env,
+        'USER_DEACTIVATION_RETENTION_DAYS',
+        30,
+        1,
+        3650,
       ),
     },
   };

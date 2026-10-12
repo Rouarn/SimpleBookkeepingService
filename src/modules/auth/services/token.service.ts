@@ -11,6 +11,8 @@ import { ERROR_CODES } from '../../../common/exceptions/error-codes.js';
 import { CronLockService } from '../../../common/cron/cron-lock.service.js';
 import { RedisCacheService } from '../../../common/redis/redis-cache.service.js';
 import { REDIS_KEYS } from '../../../common/redis/redis.constants.js';
+import { formatTimestamp } from '../../../common/utils/date.util.js';
+import { MessagesService } from '../../messages/messages.service.js';
 
 /** 选主锁 TTL 兜底（P1-20）：按任务预估时长 10 分钟 */
 const PURGE_LOCK_TTL_SECONDS = 10 * 60;
@@ -76,6 +78,7 @@ export class TokenService {
     private readonly configService: ConfigService,
     private readonly cronLock: CronLockService,
     private readonly cache: RedisCacheService,
+    private readonly messagesService: MessagesService,
   ) {
     this.jwtConfig = this.configService.get<AppConfig['jwt']>('jwt')!;
   }
@@ -148,7 +151,7 @@ export class TokenService {
    * 并发轮换竞争（P1-02）：先查幂等映射，命中则返回同一新令牌对，
    * 未命中（真窗口外重放）才全家族吊销并记安全日志。
    */
-  async rotate(rawRefreshToken: string): Promise<TokenPair> {
+  async rotate(rawRefreshToken: string, ip = ''): Promise<TokenPair> {
     const payload = this.verifyRefreshJwt(rawRefreshToken);
     const tokenHash = this.hashToken(rawRefreshToken);
 
@@ -181,6 +184,7 @@ export class TokenService {
       this.logger.warn(
         `检测到 refresh token 重用，已吊销该用户全部 refresh：userId=${String(payload.sub)}，旧 jti 摘要=${this.digestJti(payload.jti)}`,
       );
+      await this.notifySecurityAlert(String(payload.sub), ip);
       invalidRefresh();
     }
 
@@ -206,6 +210,7 @@ export class TokenService {
         this.logger.warn(
           `refresh 轮换竞争且幂等映射未命中（疑似重放），已吊销该用户全部 refresh：userId=${String(payload.sub)}，旧 jti 摘要=${this.digestJti(payload.jti)}`,
         );
+        await this.notifySecurityAlert(String(payload.sub), ip);
         invalidRefresh();
       }
       // 事务内读最新 token_version：改密并发时新令牌携带的 ver 尽量新鲜
@@ -358,5 +363,18 @@ export class TokenService {
   /** jti 摘要（安全日志用）：只落 SHA256 前 12 位，不落完整令牌。 */
   private digestJti(jti: string): string {
     return createHash('sha256').update(jti).digest('hex').slice(0, 12);
+  }
+
+  /**
+   * 安全告警站内消息（旁路增强，append 内部吞错绝不抛出）：
+   * content 仅含时间与来源 IP 摘要，不含任何 token/jti 明文。
+   */
+  private async notifySecurityAlert(userId: string, ip: string): Promise<void> {
+    await this.messagesService.append(
+      userId,
+      'security',
+      '安全提醒',
+      `检测到登录凭证异常使用，系统已于 ${formatTimestamp()} 吊销该账号全部登录态（来源 IP：${ip || '未知'}）。若非本人操作，请立即修改密码。`,
+    );
   }
 }

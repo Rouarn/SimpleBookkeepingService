@@ -14,6 +14,7 @@ import {
 } from '../../bills/dto/bill-list-query.dto.js';
 import type { BillVm } from '../../bills/vo/bill.vo.js';
 import { BooksService } from '../../books/services/books.service.js';
+import { MessagesService } from '../../messages/messages.service.js';
 
 interface UserRow {
   nickname: string;
@@ -43,6 +44,7 @@ export class OverviewService {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly billsService: BillsService,
     private readonly booksService: BooksService,
+    private readonly messagesService: MessagesService,
   ) {}
 
   async home(userId: string): Promise<{
@@ -51,20 +53,23 @@ export class OverviewService {
     month: HomeMonth;
     budget: { budget: number; progress: number; overBudget: boolean };
     today: HomeToday;
+    unreadCount: number;
   }> {
     const month = currentMonth();
     const monthQuery = Object.assign(new SummaryQueryDto(), { month });
     const todayQuery = new BookScopeQueryDto();
 
-    const [userRows, monthSummary, today, activeBook] = await Promise.all([
-      this.dataSource.query<UserRow[]>(
-        'SELECT nickname FROM users WHERE id = ? LIMIT 1',
-        [userId],
-      ),
-      this.billsService.summary(userId, monthQuery),
-      this.billsService.today(userId, todayQuery),
-      this.booksService.getActive(userId),
-    ]);
+    const [userRows, monthSummary, today, activeBook, unreadCount] =
+      await Promise.all([
+        this.dataSource.query<UserRow[]>(
+          'SELECT nickname FROM users WHERE id = ? LIMIT 1',
+          [userId],
+        ),
+        this.billsService.summary(userId, monthQuery),
+        this.billsService.today(userId, todayQuery),
+        this.booksService.getActive(userId),
+        this.messagesService.unreadCount(userId),
+      ]);
 
     const budget = round2(activeBook.budget);
     const progress =
@@ -82,6 +87,7 @@ export class OverviewService {
         overBudget: budget > 0 && monthSummary.expense > budget,
       },
       today,
+      unreadCount,
     };
   }
 }

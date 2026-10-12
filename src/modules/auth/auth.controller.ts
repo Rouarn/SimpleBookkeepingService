@@ -59,8 +59,8 @@ export class AuthController {
     },
   })
   @ApiOperation({ summary: '刷新令牌（轮换，重用即全量吊销）' })
-  refresh(@Body() dto: RefreshDto) {
-    return this.authService.refresh(dto.refreshToken);
+  refresh(@Body() dto: RefreshDto, @Ip() ip: string) {
+    return this.authService.refresh(dto.refreshToken, ip ?? '');
   }
 
   @Post('logout')

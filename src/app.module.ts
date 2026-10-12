@@ -12,6 +12,7 @@ import { DictionariesModule } from './modules/dictionaries/dictionaries.module.j
 import { BooksModule } from './modules/books/books.module.js';
 import { BillsModule } from './modules/bills/bills.module.js';
 import { UsersModule } from './modules/users/users.module.js';
+import { MessagesModule } from './modules/messages/messages.module.js';
 import { StatisticsModule } from './modules/statistics/statistics.module.js';
 import { HealthModule } from './modules/health/health.module.js';
 
@@ -29,6 +30,7 @@ import { HealthModule } from './modules/health/health.module.js';
     BooksModule,
     BillsModule,
     UsersModule,
+    MessagesModule,
     StatisticsModule,
     HealthModule,
     ScheduleModule.forRoot(),

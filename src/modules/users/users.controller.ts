@@ -6,13 +6,15 @@ import {
   Patch,
   Post,
   Put,
+  Query,
+  Res,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Throttle } from '@nestjs/throttler';
 import { ApiBody, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
-import type { Express } from 'express';
+import type { Response } from 'express';
 import { CurrentUserId } from '../../common/decorators/current-user.decorator.js';
 import { UploadThrottle } from '../../common/decorators/upload-throttle.decorator.js';
 import {
@@ -23,6 +25,8 @@ import { UsersService } from './services/users.service.js';
 import { UpdateProfileDto } from './dto/update-profile.dto.js';
 import { UpdatePreferencesDto } from './dto/preferences.dto.js';
 import { ChangePasswordDto } from './dto/change-password.dto.js';
+import { DeactivateDto } from './dto/deactivate.dto.js';
+import { ExportBillsQueryDto } from './dto/export-bills.dto.js';
 
 @ApiTags('用户')
 @Controller('users')
@@ -58,6 +62,34 @@ export class UsersController {
   @ApiOperation({ summary: '全员登出（token_version 自增并吊销全部 refresh）' })
   logoutAll(@CurrentUserId() userId: string): Promise<void> {
     return this.usersService.logoutAll(userId);
+  }
+
+  @Post('me/deactivate')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: '账号注销（校验密码，立即登出；业务数据保留期后清除）',
+  })
+  deactivate(
+    @CurrentUserId() userId: string,
+    @Body() dto: DeactivateDto,
+  ): Promise<void> {
+    return this.usersService.deactivate(userId, dto.password);
+  }
+
+  @Get('me/export')
+  @Throttle({
+    [THROTTLE_NAMES.EXPORT]: {
+      limit: THROTTLE_RATES[THROTTLE_NAMES.EXPORT].limit,
+      ttl: THROTTLE_RATES[THROTTLE_NAMES.EXPORT].ttl,
+    },
+  })
+  @ApiOperation({ summary: '导出账单 CSV（month=YYYY-MM 可选，缺省全部）' })
+  exportBills(
+    @CurrentUserId() userId: string,
+    @Query() query: ExportBillsQueryDto,
+    @Res() res: Response,
+  ): Promise<void> {
+    return this.usersService.exportBills(userId, query.month, res);
   }
 
   @Post('me/avatar')

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import {
@@ -12,6 +12,7 @@ import {
   dayLabel,
   dateLabel,
   daysInMonth,
+  monthLabel,
   monthRange,
   timeToColumn,
   todayStr,
@@ -24,6 +25,7 @@ import { codePointLength } from '../../../common/utils/text.util.js';
 import { CategoriesService } from '../../dictionaries/services/categories.service.js';
 import { PayMethodsService } from '../../dictionaries/services/pay-methods.service.js';
 import { BooksService } from '../../books/services/books.service.js';
+import { MessagesService } from '../../messages/messages.service.js';
 import {
   RedisCacheService,
   STAT_MONTH_SLOTS,
@@ -150,6 +152,8 @@ interface NormalizedBillInput {
  */
 @Injectable()
 export class BillsService {
+  private readonly logger = new Logger('BillsService');
+
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly categoriesService: CategoriesService,
@@ -160,6 +164,7 @@ export class BillsService {
     private readonly cleanupService: CleanupService,
     private readonly idempotencyService: IdempotencyService,
     private readonly redisCache: RedisCacheService,
+    private readonly messagesService: MessagesService,
   ) {}
 
   // ---------- 查询 ----------
@@ -462,6 +467,12 @@ export class BillsService {
         normalized.recordDate,
         normalized.bookId,
       );
+      // 事务提交后旁路提醒：当月支出达到/超出账本预算时发站内消息（失败不影响主流程）
+      await this.maybeNotifyBudgetOver(
+        userId,
+        normalized.bookId,
+        normalized.recordDate,
+      );
       return this.buildDetail(userId, billId);
     } catch (error) {
       await this.idempotencyService.fail(userId, idempotencyKey);
@@ -665,6 +676,54 @@ export class BillsService {
   }
 
   // ---------- 内部工具 ----------
+
+  /**
+   * 超预算提醒（create 事务提交后调用）：账单所在月的用户支出合计
+   * ≥ 该账本预算（budget>0）时发 budget_over 站内消息。
+   * 幂等：Redis SET NX `bk:msg:budget:{userId}:{YYYY-MM}`（TTL 32 天），
+   * 同月同用户只发一条；任意异常仅告警，绝不影响建账单主流程。
+   */
+  private async maybeNotifyBudgetOver(
+    userId: string,
+    bookId: string,
+    recordDate: string,
+  ): Promise<void> {
+    try {
+      const month = recordDate.slice(0, 7);
+      const [monthStart, monthEnd] = monthRange(month);
+      const rows = await this.dataSource.query<
+        Array<{ budget: string | null; month_expense: string | number }>
+      >(
+        `SELECT bk.budget,
+                COALESCE((
+                   SELECT SUM(b.amount) FROM bills b
+                    WHERE b.user_id = bk.user_id AND b.type = 'expense'
+                      AND b.record_date >= ? AND b.record_date < ?
+                 ), 0) AS month_expense
+           FROM books bk
+          WHERE bk.id = ? AND bk.user_id = ?
+          LIMIT 1`,
+        [monthStart, monthEnd, bookId, userId],
+      );
+      const row = rows[0];
+      const budget = Number(row?.budget ?? 0);
+      if (!(budget > 0)) return;
+      const expense = round2(row!.month_expense);
+      if (expense < budget) return;
+      await this.messagesService.append(
+        userId,
+        'budget_over',
+        '预算超支提醒',
+        `${monthLabel(month)}支出合计 ${expense.toFixed(2)} 元，已达到或超出月预算 ${budget.toFixed(2)} 元`,
+        { month, bookId, expense, budget },
+        REDIS_KEYS.msgBudgetDedup(userId, month),
+      );
+    } catch (error) {
+      this.logger.warn(
+        `超预算提醒生成失败 userId=${userId}: ${(error as Error).message}`,
+      );
+    }
+  }
 
   /**
    * 统计缓存失效：带 recordDate 时精确删除该月/年相关 key

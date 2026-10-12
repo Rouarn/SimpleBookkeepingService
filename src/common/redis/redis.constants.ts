@@ -37,6 +37,9 @@ export const REDIS_KEYS = {
       : `bk:stat:${slot}:${userId}:${bookScope}:${period}`,
   /** 某用户全部统计缓存（SCAN 失效用） */
   statPatternUser: (userId: string): string => `bk:stat:*:${userId}:*`,
+  /** 超预算提醒当月幂等键（NX EX 32 天）：同一用户同一月仅发一条 budget_over */
+  msgBudgetDedup: (userId: string, month: string): string =>
+    `bk:msg:budget:${userId}:${month}`,
   /** 删除账单/替换头像后文件的 7 天保留墓碑（ZSET：member=key, score=删除时刻 unix） */
   tombstoneBills: 'bk:cleanup:tombstone:bills',
   tombstoneAvatars: 'bk:cleanup:tombstone:avatars',

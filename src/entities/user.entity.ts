@@ -13,8 +13,12 @@ export class User {
   @PrimaryGeneratedColumn({ type: 'bigint', unsigned: true })
   id: string;
 
+  /**
+   * 手机号唯一键。注销时改写为 'del:{id}:{随机10位}' 以释放占用，
+   * 最大长度 4+19+1+10=34，故列宽 40（sql/004_messages.sql 同步 MODIFY）。
+   */
   @Index('uk_phone', { unique: true })
-  @Column({ type: 'varchar', length: 20 })
+  @Column({ type: 'varchar', length: 40 })
   phone: string;
 
   @Column({ type: 'varchar', length: 100, name: 'password_hash' })
@@ -29,7 +33,7 @@ export class User {
   @Column({ type: 'date', name: 'join_date' })
   joinDate: string;
 
-  /** 状态：1 正常 0 冻结 */
+  /** 状态：1 正常 0 冻结 2 注销（注销保留匿名行，业务数据由注销清理任务回收） */
   @Column({ type: 'tinyint', unsigned: true, default: 1 })
   status: number;
 
@@ -47,6 +51,15 @@ export class User {
     name: 'last_login_at',
   })
   lastLoginAt: Date | null;
+
+  /** 申请注销时刻（status=2 时写入）；保留期满由清理任务回收业务数据 */
+  @Column({
+    type: 'datetime',
+    precision: 3,
+    nullable: true,
+    name: 'deactivated_at',
+  })
+  deactivatedAt: Date | null;
 
   @CreateDateColumn({
     type: 'datetime',

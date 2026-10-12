@@ -9,6 +9,7 @@ import type {
 import type { AppConfig } from '../config/configuration.js';
 import { SnakeNamingStrategy } from './naming.strategy.js';
 import { User } from '../entities/user.entity.js';
+import { Message } from '../entities/message.entity.js';
 import { RefreshToken } from '../entities/refresh-token.entity.js';
 import { Book } from '../entities/book.entity.js';
 import { Category } from '../entities/category.entity.js';
@@ -139,6 +140,7 @@ class SanitizedTypeOrmLogger implements TypeOrmLogger {
           ssl,
           entities: [
             User,
+            Message,
             RefreshToken,
             Book,
             Category,
