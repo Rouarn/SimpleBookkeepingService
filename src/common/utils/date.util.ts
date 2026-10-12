@@ -35,7 +35,9 @@ export function isDateString(value: string): boolean {
   const year = Number(match[1]);
   const month = Number(match[2]);
   const day = Number(match[3]);
-  return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth(year, month);
+  return (
+    month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth(year, month)
+  );
 }
 
 export function isTimeString(value: string): boolean {

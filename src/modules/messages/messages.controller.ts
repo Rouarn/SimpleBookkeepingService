@@ -1,18 +1,8 @@
-import {
-  Body,
-  Controller,
-  Get,
-  HttpCode,
-  Put,
-  Query,
-} from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Put, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUserId } from '../../common/decorators/current-user.decorator.js';
 import { MessagesService } from './messages.service.js';
-import {
-  MarkReadDto,
-  MessageListQueryDto,
-} from './dto/message-query.dto.js';
+import { MarkReadDto, MessageListQueryDto } from './dto/message-query.dto.js';
 
 /**
  * 消息中心（鉴权走全局 JwtAuthGuard，无需显式 @UseGuards）。
@@ -31,7 +21,9 @@ export class MessagesController {
   @Get('unread-count')
   @ApiOperation({ summary: '未读消息数' })
   unreadCount(@CurrentUserId() userId: string) {
-    return this.messagesService.unreadCount(userId).then((count) => ({ count }));
+    return this.messagesService
+      .unreadCount(userId)
+      .then((count) => ({ count }));
   }
 
   @Put('read')

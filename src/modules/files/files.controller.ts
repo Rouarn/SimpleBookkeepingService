@@ -9,7 +9,10 @@ import {
 import type { Response } from 'express';
 import { ApiExcludeController, ApiOperation } from '@nestjs/swagger';
 import { Public } from '../../common/decorators/public.decorator.js';
-import { FileSignGuard, type FileSignRequest } from './guards/file-sign.guard.js';
+import {
+  FileSignGuard,
+  type FileSignRequest,
+} from './guards/file-sign.guard.js';
 import { StorageService } from './services/storage.service.js';
 
 /**

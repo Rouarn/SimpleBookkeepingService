@@ -116,7 +116,9 @@ export class IdempotencyService {
    * 读取并解析幂等记录；值损坏（非法 JSON）时删除该 key 并视为无缓存，
    * 按首次请求重新处理，不让脏值演变为 500。
    */
-  private async readRecord(redisKey: string): Promise<IdempotencyRecord | null> {
+  private async readRecord(
+    redisKey: string,
+  ): Promise<IdempotencyRecord | null> {
     const raw = await this.redis.get(redisKey);
     if (raw === null) return null;
     try {

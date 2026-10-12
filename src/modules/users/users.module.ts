@@ -9,7 +9,13 @@ import { UsersService } from './services/users.service.js';
 
 @Module({
   // AuthModule 提供 TokenService（改密/全员登出复用其 token_version 与吊销能力）
-  imports: [AuthModule, BooksModule, DictionariesModule, FilesModule, MessagesModule],
+  imports: [
+    AuthModule,
+    BooksModule,
+    DictionariesModule,
+    FilesModule,
+    MessagesModule,
+  ],
   controllers: [UsersController],
   providers: [UsersService],
 })

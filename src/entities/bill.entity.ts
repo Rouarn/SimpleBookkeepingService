@@ -21,12 +21,7 @@ import { User } from './user.entity.js';
 // 账本维度列表/今日/分组：book_id 等值 + record_date 范围，索引序与
 // ORDER BY record_date, record_time, created_at 一致可免 filesort；
 // 与 idx_user_datetime 共存，优化器按全部账本/单账本扫描成本自选（P2-04）
-@Index('idx_book_datetime', [
-  'bookId',
-  'recordDate',
-  'recordTime',
-  'createdAt',
-])
+@Index('idx_book_datetime', ['bookId', 'recordDate', 'recordTime', 'createdAt'])
 // idx_category / idx_pay_method 单列索引已删除：全库无「不带 user_id 前缀」
 // 的 category_id/pay_method_id 查询，列表过滤与统计 GROUP BY 均由
 // user_id 前导索引覆盖（P2-04，详见 sql/002_indexes.sql）

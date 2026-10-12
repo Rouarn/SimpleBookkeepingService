@@ -60,9 +60,7 @@ export class CronLockService {
         await this.redis.eval(RELEASE_LOCK_SCRIPT, 1, lockKey, owner);
       } catch (error) {
         // 释放失败仅告警：锁有 TTL 兜底，不会永久阻塞下一轮任务
-        this.logger.warn(
-          `任务 ${job} 释放锁失败: ${(error as Error).message}`,
-        );
+        this.logger.warn(`任务 ${job} 释放锁失败: ${(error as Error).message}`);
       }
     }
   }

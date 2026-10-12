@@ -68,7 +68,13 @@ export class MessagesService {
       await this.dataSource.query(
         `INSERT INTO messages (user_id, type, title, content, payload)
          VALUES (?, ?, ?, ?, ?)`,
-        [userId, type, title, content, payload ? JSON.stringify(payload) : null],
+        [
+          userId,
+          type,
+          title,
+          content,
+          payload ? JSON.stringify(payload) : null,
+        ],
       );
       // 软上限：多表 DELETE 一次性清掉最新 200 条之外的旧消息
       await this.dataSource.query(
