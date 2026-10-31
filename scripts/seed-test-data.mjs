@@ -4,6 +4,13 @@ import { resolve, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { config as dotenvConfig } from 'dotenv';
 
+/**
+ * 使用方法：
+ * SEED_PHONE=13800138000 SEED_IMAGE_DIR='' node ./scripts/seed-test-data.mjs
+ * 1.SEED_PHONE：必选，指定目标用户手机号（默认随机生成）
+ * 2.SEED_IMAGE_DIR：可选，指定凭证图片素材目录（默认不生成图片）
+ */
+
 // 读 .env.development（或 DOTENV_PATH 指定的文件），禁止在脚本内硬编码口令/手机号
 dotenvConfig({ path: process.env.DOTENV_PATH ?? '.env.development' });
 
